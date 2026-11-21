@@ -60,6 +60,8 @@ const CallContext = createContext<CallContextType | undefined>(undefined);
  */
 export function getFriendlyEndMessage(reason?: string): string {
   switch (reason) {
+    case 'caller_left':
+      return 'The caller cancelled the call before you answered.';
     case 'caller_hangup':
     case 'callee_hangup':
     case 'ended':
@@ -91,7 +93,7 @@ export function getFriendlyEndMessage(reason?: string): string {
 }
 
 export function CallProvider({ children }: { children: ReactNode }) {
-  const { socket, isConnected } = useSocket();
+  const { socket, isConnected, socketError } = useSocket();
 
   const [callStatus, setCallStatus] = useState<CallStatus>('idle');
   const [currentCall, setCurrentCall] = useState<ActiveCall | null>(null);
@@ -103,6 +105,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [isSpeaker, setIsSpeaker] = useState<boolean>(false);
 
   const timerRef = useRef<any>(null);
+  const callDurationRef = useRef<number>(0);
+  callDurationRef.current = callDuration;
+
+  const socketErrorRef = useRef<string | null>(socketError);
+  socketErrorRef.current = socketError;
+
+  const disconnectTimerRef = useRef<any>(null);
   const audioEngine = getAudioEngine();
 
   // Reset duration timer helper
@@ -214,7 +223,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         callCode: payload?.callCode,
         reason,
         friendlyMessage: getFriendlyEndMessage(reason),
-        durationSeconds: payload?.durationSeconds || callDuration,
+        durationSeconds: payload?.durationSeconds ?? callDurationRef.current,
       });
 
       setCurrentCall(null);
@@ -225,7 +234,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     };
 
     // 6. No Users Available
-    const handleNoneAvailable = (payload: any) => {
+    const handleNoneAvailable = () => {
       stopDurationTimer();
       audioEngine.cleanup();
 
@@ -242,6 +251,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
     // 7. General Call Errors (Billing, daily cap, etc.)
     const handleError = (payload: any) => {
+      console.error('[Socket Event] call:error received:', payload?.error || payload);
       stopDurationTimer();
       audioEngine.cleanup();
 
@@ -279,29 +289,57 @@ export function CallProvider({ children }: { children: ReactNode }) {
       socket.off('no_users_available', handleNoneAvailable);
       socket.off(SOCKET_EVENTS.CALL_ERROR, handleError);
     };
-  }, [socket, callDuration]);
+  }, [socket]);
 
-  // Clean up if connection drops mid-call
+  // Clean up if connection drops mid-call with ~5 second grace period
   useEffect(() => {
     if (!isConnected && (callStatus === 'connected' || callStatus === 'ringing')) {
-      stopDurationTimer();
-      audioEngine.cleanup();
-      setLastEndInfo({
-        reason: 'disconnected',
-        friendlyMessage: getFriendlyEndMessage('disconnected'),
-      });
-      setCurrentCall(null);
-      setIncomingCall(null);
-      setCallStatus('ended');
+      const realReason = socketError || 'transport close';
+      console.warn(
+        `[CallContext] Socket disconnected mid-call (status: ${callStatus}). Starting 5s grace period before ending call. Real reason / error: ${realReason}`
+      );
+
+      if (!disconnectTimerRef.current) {
+        disconnectTimerRef.current = setTimeout(() => {
+          console.error(
+            `[CallContext] Disconnect grace period (5s) expired without reconnect. Ending call due to network disconnection. Reason: ${socketErrorRef.current || 'network error'}`
+          );
+          stopDurationTimer();
+          audioEngine.cleanup();
+          setLastEndInfo({
+            reason: 'disconnected',
+            friendlyMessage: `Call ended due to network disconnection (${socketErrorRef.current || 'network error'}).`,
+          });
+          setCurrentCall(null);
+          setIncomingCall(null);
+          setCallStatus('ended');
+          disconnectTimerRef.current = null;
+        }, 5000);
+      }
+    } else if (isConnected && disconnectTimerRef.current) {
+      clearTimeout(disconnectTimerRef.current);
+      disconnectTimerRef.current = null;
     }
-  }, [isConnected, callStatus]);
+
+    return () => {
+      if (callStatus === 'idle' || callStatus === 'ended') {
+        if (disconnectTimerRef.current) {
+          clearTimeout(disconnectTimerRef.current);
+          disconnectTimerRef.current = null;
+        }
+      }
+    };
+  }, [isConnected, callStatus, socketError]);
 
   // -------------------------------------------------------------------------
   // Public Action Handlers
   // -------------------------------------------------------------------------
 
   const startFind = () => {
-    if (!socket || !isConnected) return;
+    if (!socket || !isConnected) {
+      console.warn('[CallContext] startFind called but socket is not connected.');
+      return;
+    }
     setLastEndInfo(null);
     setCallStatus('searching');
     socket.emit(SOCKET_EVENTS.CALL_FIND, (ack: any) => {
@@ -319,7 +357,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (currentCall?.callCode && socket) {
       socket.emit(SOCKET_EVENTS.CALL_END, {
         callCode: currentCall.callCode,
-        reason: 'caller_hangup',
+        reason: 'caller_left',
+      });
+      socket.emit('call:cancel', {
+        callCode: currentCall.callCode,
+        reason: 'caller_left',
       });
     }
     stopDurationTimer();

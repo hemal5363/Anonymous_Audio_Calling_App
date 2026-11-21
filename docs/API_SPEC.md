@@ -231,7 +231,7 @@ Revokes the current refresh token and clears active device presence.
 Retrieves public authentication capabilities and feature flags (such as whether mobile phone login is currently enabled).
 
 - **Method:** `GET`
-- **Path:** `/auth/config` (also available via `/config/public`)
+- **Path:** `/auth/config` (also available via `/auth/mobile-login-enabled` and `/config/public`)
 - **Auth Required:** None
 - **Request Body:** None
 - **Response Body (`200 OK`):**
@@ -859,8 +859,10 @@ Returns a paginated list of all call sessions. Strictly exposes anonymous sessio
 
 ## 7. Socket.IO Real-Time Events (WSS)
 
-Socket.IO connection URL: `wss://api.yourdomain.com/socket.io/?token=<access_token>`  
-All client-emitted events require an authenticated socket connection.
+Socket.IO connection URL: `wss://api.yourdomain.com/socket.io/?token=<access_token>` (or `http://<HOST>:3000/socket.io`)  
+All client-emitted events require an authenticated socket connection (`auth: { token: 'Bearer <token>' }`).  
+**Transports:** The client connects using `['polling', 'websocket']` with `tryAllTransports: true` (starts on polling, then transparently upgrades to websocket).  
+**Connection Resilience:** The client maintains a 5-second disconnect grace period before treating an unexpected network drop mid-call as a call termination (`network_error`).
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -872,7 +874,7 @@ All client-emitted events require an authenticated socket connection.
        |--- presence:hello ------------------->|                                    |
        |                                       |<--- presence:hello ----------------|
        |                                       |                                    |
-       |--- call:request --------------------->| (Find available match)             |
+       |--- call:find / call:request --------->| (Find available match)             |
        |                                       |--- call:incoming ----------------->| (or FCM Push)
        |                                       |                                    |
        |                                       |<--- call:accept -------------------|
@@ -889,7 +891,7 @@ All client-emitted events require an authenticated socket connection.
        |                                       |--- billing:warning --------------->|
        |                                       |--- billing:balance --------------->|
        |                                       |                                    |
-       |--- call:end ------------------------->|                                    |
+       |--- call:end / call:cancel ----------->|                                    |
        |<-- call:ended {reason} ---------------|--- call:ended {reason} ----------->|
 ```
 
@@ -906,13 +908,26 @@ All client-emitted events require an authenticated socket connection.
 
 ### 7.2 Call Negotiation & Signaling
 
-#### `call:request`
+#### `call:find` (alias `call:request`)
 - **Direction:** Client $\rightarrow$ Server
 - **Payload:**
 ```json
 {}
 ```
-- **Description:** Caller initiates a call. Server executes billing pre-check and triggers matching algorithm.
+- **Description:** Caller initiates a call search. Server executes billing pre-check and triggers matching algorithm. Caller enters ringing state; callee receives incoming call event with a 30-second server-enforced timeout.
+
+---
+
+#### `call:cancel`
+- **Direction:** Caller Client $\rightarrow$ Server
+- **Payload:**
+```json
+{
+  "callCode": "c7a1e2b4-5f6d-7e8a-9b0c-1d2e3f4a5b6c",
+  "reason": "caller_left"
+}
+```
+- **Description:** Caller cancels the call while searching or ringing. The session terminates immediately with `end_reason = 'caller_left'`, clears the 30-second ring timeout, releases both users, and notifies the callee with `call:ended`.
 
 ---
 
@@ -925,7 +940,7 @@ All client-emitted events require an authenticated socket connection.
   "ringSeconds": 30
 }
 ```
-- **Description:** Delivered to candidate with an open app connection. (If closed/backgrounded, FCM high-priority push payload `data: { type: "incoming_call", callCode }` wakes the device).
+- **Description:** Delivered to candidate with an open app connection. (If closed/backgrounded, FCM high-priority push payload `data: { type: "incoming_call", callCode }` wakes the device). Enforces a 30-second ringing timeout.
 
 ---
 
@@ -941,7 +956,7 @@ All client-emitted events require an authenticated socket connection.
 
 ---
 
-#### `call:decline`
+#### `call:decline` (alias `call:reject`)
 - **Direction:** Callee Client $\rightarrow$ Server
 - **Payload:**
 ```json
@@ -950,7 +965,7 @@ All client-emitted events require an authenticated socket connection.
   "reason": "declined"
 }
 ```
-- **Description:** Callee declines. Server selects the next candidate without notifying the caller.
+- **Description:** Callee declines the call. Session is terminated with `status = 'declined'`.
 
 ---
 
@@ -959,6 +974,7 @@ All client-emitted events require an authenticated socket connection.
 - **Payload:**
 ```json
 {
+  "error": "no_users_available",
   "message": "No available users at this moment. Please try again shortly."
 }
 ```
@@ -972,6 +988,7 @@ All client-emitted events require an authenticated socket connection.
 ```json
 {
   "callCode": "c7a1e2b4-5f6d-7e8a-9b0c-1d2e3f4a5b6c",
+  "sessionId": "b4e803db-07ab-4328-91c6-258ca867ef41",
   "role": "caller", // or "callee"
   "iceServers": [
     { "urls": "stun:stun.yourdomain.com:3478" },
@@ -1086,10 +1103,10 @@ All client-emitted events require an authenticated socket connection.
 ```json
 {
   "callCode": "c7a1e2b4-5f6d-7e8a-9b0c-1d2e3f4a5b6c",
-  "reason": "caller_hangup" // or "skipped"
+  "reason": "caller_hangup" // or "skipped", "caller_left"
 }
 ```
-- **Description:** Sent when a user taps "End Call" or "Skip".
+- **Description:** Sent when a user taps "End Call", "Skip", or cancels a call.
 
 ---
 
@@ -1103,5 +1120,5 @@ All client-emitted events require an authenticated socket connection.
   "reason": "caller_hangup"
 }
 ```
-*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`.
+*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`, `'caller_left'`, `'declined'`, `'blocked'`, `'ended'`.
 - **Description:** Closes session, cleans up peer connection, and presents the Report/Block prompt on the client.

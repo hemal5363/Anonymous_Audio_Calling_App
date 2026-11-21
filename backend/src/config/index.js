@@ -18,6 +18,7 @@ const envSchema = z.object({
   TURN_CREDENTIAL: z.string().default('turn_secret_password'),
   ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5173,http://127.0.0.1:5173'),
   EXPO_DEV_ORIGIN: z.string().default('http://localhost:8081,http://127.0.0.1:8081'),
+  LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
 });
 
 const parsed = envSchema.safeParse(process.env);

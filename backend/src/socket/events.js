@@ -9,6 +9,7 @@ export const SOCKET_EVENTS = {
   // Call Negotiation & Signaling
   CALL_FIND: 'call:find',
   CALL_REQUEST: 'call:request',
+  CALL_CANCEL: 'call:cancel',
   CALL_RINGING: 'call:ringing',
   CALL_INCOMING: 'call:incoming',
   CALL_ACCEPT: 'call:accept',

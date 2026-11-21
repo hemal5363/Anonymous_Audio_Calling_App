@@ -359,6 +359,16 @@ async function runSimulation() {
   console.log(`${GREEN}✔ Both peers received 'call:ended' notification.${RESET}`);
 
   step(14, 'Cleanup and Teardown');
+  // Always reset availability to false so simulation users do not stay available in database
+  try {
+    console.log('Resetting simulation users availability to false...');
+    await setAvailability(serverUrl, userA.token, false).catch(() => {});
+    await setAvailability(serverUrl, userB.token, false).catch(() => {});
+    console.log(`${GREEN}✔ Simulation users availability reset to false.${RESET}`);
+  } catch (err) {
+    console.warn('Could not reset availability:', err.message);
+  }
+
   socketA.disconnect();
   socketB.disconnect();
 

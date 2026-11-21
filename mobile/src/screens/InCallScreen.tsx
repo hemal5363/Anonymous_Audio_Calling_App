@@ -26,6 +26,8 @@ export default function InCallScreen() {
     skipCall,
     reportPeer,
     blockPeer,
+    lastEndInfo,
+    clearEndInfo,
   } = useCall();
 
   // Report modal state
@@ -34,14 +36,29 @@ export default function InCallScreen() {
   const [reportNote, setReportNote] = useState<string>('');
   const [submittingReport, setSubmittingReport] = useState(false);
 
-  // Navigate back to Home or Searching when call ends
+  // Navigate back to Home or Searching when call ends (never navigate to Home silently)
   useEffect(() => {
-    if (callStatus === 'idle' || callStatus === 'ended') {
+    if (callStatus === 'ended') {
+      Alert.alert(
+        'Call Ended',
+        lastEndInfo?.friendlyMessage || 'The call has ended.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              clearEndInfo();
+              navigation.replace('Home');
+            },
+          },
+        ],
+        { cancelable: false }
+      );
+    } else if (callStatus === 'idle') {
       navigation.replace('Home');
     } else if (callStatus === 'searching') {
       navigation.replace('Searching');
     }
-  }, [callStatus, navigation]);
+  }, [callStatus, lastEndInfo, navigation, clearEndInfo]);
 
   // Format MM:SS timer
   const formatTime = (totalSeconds: number) => {

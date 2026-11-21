@@ -1,4 +1,5 @@
 import { Server } from 'socket.io';
+import { pool } from '../db/index.js';
 import { socketAuthMiddleware } from './socketAuth.middleware.js';
 import { userSocketMap } from './userSocketMap.js';
 import { callSessionManager } from './callSessionManager.js';
@@ -28,7 +29,6 @@ let ioInstance = null;
  */
 export function initSocketServer(httpServer) {
   const allowedOrigins = config.cors.getAllowedOrigins();
-  const isWildcard = allowedOrigins.includes('*');
 
   const io = new Server(httpServer, {
     path: '/socket.io',
@@ -64,12 +64,9 @@ export function initSocketServer(httpServer) {
     pingInterval: 25000,
   });
 
-  // Log every engine-level connection error with code, message, and context
+  // Log every engine-level connection error at debug level
   io.engine.on('connection_error', (err) => {
-    logger.error(
-      `[Engine.IO Connection Error] Code: ${err.code}, Message: "${err.message}", Req URL: ${err.req?.url}, Origin: ${err.req?.headers?.origin}, Transport: ${err.req?._query?.transport}, Remote IP: ${err.req?.socket?.remoteAddress || 'unknown'}, Context:`,
-      err.context
-    );
+    logger.debug(`[Engine.IO Connection Error] Code: ${err.code}, Message: "${err.message}"`);
   });
 
   // Authenticate every socket connection with user's JWT access token
@@ -83,13 +80,13 @@ export function initSocketServer(httpServer) {
     // Join personal room for targeted emits by userId
     socket.join(`user:${userId}`);
 
-    logger.info(`Socket connected successfully: [socketId: ${socket.id}, userId: ${userId}, totalOnline: ${userSocketMap.getOnlineCount()}]`);
+    logger.debug(`Socket connected [socketId: ${socket.id}]`);
 
     // -----------------------------------------------------------------------
     // 1. Presence & Setup
     // -----------------------------------------------------------------------
     socket.on(SOCKET_EVENTS.PRESENCE_HELLO, () => {
-      logger.info(`Presence confirmed: [userId: ${userId}, socketId: ${socket.id}]`);
+      logger.debug(`Presence confirmed [socketId: ${socket.id}]`);
       socket.emit('presence:ack', {
         userId,
         socketId: socket.id,
@@ -105,10 +102,12 @@ export function initSocketServer(httpServer) {
 
       try {
         const liveSocketUserIds = userSocketMap.getOnlineUserIds();
+        logger.debug(`Call find requested [socketId: ${socket.id}]`);
         const matchResult = await matchCaller(userId, liveSocketUserIds);
 
         if (!matchResult.success) {
           if (matchResult.error === 'no_users_available') {
+            logger.debug('No available match for caller');
             socket.emit('no_users_available', {
               error: 'no_users_available',
               message: 'No available users at this moment.',
@@ -128,6 +127,7 @@ export function initSocketServer(httpServer) {
             return;
           }
 
+          logger.debug(`Call match error: ${matchResult.error}`);
           socket.emit(SOCKET_EVENTS.CALL_ERROR, {
             error: matchResult.error,
             message: matchResult.message,
@@ -144,6 +144,7 @@ export function initSocketServer(httpServer) {
         }
 
         const { session, callee } = matchResult;
+        logger.debug(`Call matched [callCode: ${session.callCode}]`);
 
         // Register session in in-memory CallSessionManager with a 30s ringing timeout
         callSessionManager.createSession({
@@ -155,6 +156,7 @@ export function initSocketServer(httpServer) {
           ringTimeoutMs: 30000,
           onRingTimeout: async (s) => {
             try {
+              logger.debug(`Ring timeout reached [callCode: ${s.callCode}]`);
               await handleRingingTimeout({ callCode: s.callCode });
               const endPayload = {
                 callCode: s.callCode,
@@ -190,6 +192,7 @@ export function initSocketServer(httpServer) {
         };
 
         socket.emit(SOCKET_EVENTS.CALL_RINGING, callerPayload);
+        logger.debug(`Ringing emitted [callCode: ${session.callCode}]`);
 
         // Notify callee if online via live socket
         const calleeSocketId = userSocketMap.getSocketId(callee.id);
@@ -206,8 +209,10 @@ export function initSocketServer(httpServer) {
             role: 'callee',
             iceServers: config.webrtc.getIceServers(),
           });
+          logger.debug(`Incoming emitted [callCode: ${session.callCode}]`);
         } else {
           // Callee has no active socket connection -> wake up via push notification
+          logger.debug(`Push dispatched for offline callee [sessionId: ${session.id}]`);
           await pushService.sendIncomingCallPush(callee.pushToken, session.id);
         }
 
@@ -252,6 +257,7 @@ export function initSocketServer(httpServer) {
         return;
       }
 
+      logger.debug(`Call accept received [callCode: ${callCode}]`);
       const res = await acceptCall({ callCode, calleeId: userId });
       if (!res.success) {
         socket.emit(SOCKET_EVENTS.CALL_ERROR, res);
@@ -279,6 +285,7 @@ export function initSocketServer(httpServer) {
         io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_MATCHED, callerPayload);
       }
       socket.emit(SOCKET_EVENTS.CALL_MATCHED, calleePayload);
+      logger.debug(`Call matched emitted [callCode: ${callCode}]`);
 
       if (ack) ack({ success: true, callCode, sessionId: res.sessionId });
     });
@@ -293,6 +300,7 @@ export function initSocketServer(httpServer) {
         return;
       }
 
+      logger.debug(`Call decline received [callCode: ${callCode}, reason: ${reason}]`);
       const res = await declineCall({ callCode, calleeId: userId, reason });
       if (!res.success) {
         if (ack) ack(res);
@@ -326,7 +334,7 @@ export function initSocketServer(httpServer) {
 
       // Enforce strict security: reject relays from anyone not part of that session
       if (!callSessionManager.isParticipant(callCode, userId)) {
-        logger.warn(`Unauthorized relay attempt rejected: [userId: ${userId}, callCode: ${callCode}, event: ${eventName}]`);
+        logger.debug(`Unauthorized relay attempt rejected [callCode: ${callCode}, event: ${eventName}]`);
         socket.emit(SOCKET_EVENTS.CALL_ERROR, {
           error: 'unauthorized_relay',
           message: 'You are not an authorized participant of this call session.',
@@ -348,13 +356,13 @@ export function initSocketServer(httpServer) {
     socket.on(SOCKET_EVENTS.SIGNAL_ICE, handleRelay(SOCKET_EVENTS.SIGNAL_ICE));
 
     // -----------------------------------------------------------------------
-    // 5. In-Call Lifecycle, Skip, Mute, Report, Block, & End
+    // 5. In-Call Lifecycle, Skip, Mute, Report, Block, & End / Cancel
     // -----------------------------------------------------------------------
     socket.on(SOCKET_EVENTS.CALL_CONNECTED, async (payload) => {
       const callCode = payload?.callCode;
       if (callCode && callSessionManager.isParticipant(callCode, userId)) {
         callSessionManager.markConnected(callCode);
-        logger.info(`WebRTC connected event received for session: ${callCode}`);
+        logger.debug(`WebRTC connected event received [callCode: ${callCode}]`);
 
         const session = callSessionManager.getSession(callCode);
         if (session && !isCallBillingTimerActive(callCode)) {
@@ -368,8 +376,8 @@ export function initSocketServer(httpServer) {
       }
     });
 
-    // Call End
-    socket.on(SOCKET_EVENTS.CALL_END, async (payload, callback) => {
+    // Call End or Cancel (including ringing cancellations)
+    const handleCallEndOrCancel = async (payload, callback) => {
       const ack = typeof callback === 'function' ? callback : null;
       const callCode = payload?.callCode;
       const reason = payload?.reason;
@@ -388,6 +396,49 @@ export function initSocketServer(httpServer) {
         return;
       }
 
+      const session = callSessionManager.getSession(callCode);
+
+      // Handle cancel while call is ringing: end session immediately with caller_left, clear ring timeout, release both users
+      if (session && session.status === 'ringing' && !session.connectedAt) {
+        const isCaller = session.callerId === userId;
+        const endReason = isCaller ? 'caller_left' : (reason || 'callee_hangup');
+        logger.debug(`Ringing call cancelled [callCode: ${callCode}, reason: ${endReason}]`);
+
+        callSessionManager.clearRingingTimer(session);
+        callSessionManager.endSession(callCode);
+
+        try {
+          await pool.query(
+            `UPDATE call_sessions 
+             SET status = 'ended', end_reason = $1, duration_seconds = 0, ended_at = CURRENT_TIMESTAMP 
+             WHERE call_code = $2;`,
+            [endReason, callCode]
+          );
+
+          io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
+            callCode,
+            durationSeconds: 0,
+            reason: endReason,
+          });
+
+          const peerUserId = isCaller ? session.calleeId : session.callerId;
+          const peerSocketId = userSocketMap.getSocketId(peerUserId);
+          if (peerSocketId) {
+            io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+              callCode,
+              durationSeconds: 0,
+              reason: endReason,
+            });
+          }
+        } catch (err) {
+          logger.error('Error ending ringing session upon cancel:', err.message);
+        }
+
+        if (ack) ack({ success: true, durationSeconds: 0, reason: endReason });
+        return;
+      }
+
+      logger.debug(`Call end requested [callCode: ${callCode}, reason: ${reason}]`);
       const res = await endCall({ callCode, userId, reason });
       if (res.success) {
         io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
@@ -398,7 +449,10 @@ export function initSocketServer(httpServer) {
 
         if (ack) ack({ success: true, durationSeconds: res.durationSeconds, reason: res.reason });
       }
-    });
+    };
+
+    socket.on(SOCKET_EVENTS.CALL_END, handleCallEndOrCancel);
+    socket.on('call:cancel', handleCallEndOrCancel);
 
     // Skip Action: end call and immediately search for a new match
     const handleSkip = async (payload, callback) => {
@@ -436,7 +490,7 @@ export function initSocketServer(httpServer) {
       if (ack) ack({ success: true, skipped: true });
 
       // Immediately search for next candidate
-      logger.info(`Caller ${userId} skipped call ${callCode}. Searching for next available match immediately...`);
+      logger.debug(`Call skipped [callCode: ${callCode}]. Searching next candidate...`);
       await handleCallFind({}, null);
     };
 
@@ -504,32 +558,91 @@ export function initSocketServer(httpServer) {
     // -----------------------------------------------------------------------
     socket.on('disconnect', async (reason) => {
       userSocketMap.removeBySocketId(socket.id);
-      logger.info(`Socket disconnected: [socketId: ${socket.id}, userId: ${userId}, reason: ${reason}, remainingOnline: ${userSocketMap.getOnlineCount()}]`);
+      logger.debug(`Socket disconnected [socketId: ${socket.id}, reason: ${reason}]`);
 
       // Check if user is in an active session
       const activeSession = callSessionManager.getSessionByUserId(userId);
       if (activeSession) {
-        logger.info(`User ${userId} disconnected during active call session ${activeSession.callCode}. Concluding call with network_error.`);
+        if (activeSession.status === 'ringing' && !activeSession.connectedAt) {
+          // If caller disconnected while call is ringing:
+          if (activeSession.callerId === userId) {
+            logger.debug(`Caller disconnected during ringing [callCode: ${activeSession.callCode}]`);
+            callSessionManager.clearRingingTimer(activeSession);
+            callSessionManager.endSession(activeSession.callCode);
 
-        try {
-          const res = await endCall({
-            callCode: activeSession.callCode,
-            userId,
-            reason: 'network_error',
-          });
+            try {
+              await pool.query(
+                `UPDATE call_sessions 
+                 SET status = 'ended', end_reason = 'caller_left', duration_seconds = 0, ended_at = CURRENT_TIMESTAMP 
+                 WHERE call_code = $1;`,
+                [activeSession.callCode]
+              );
 
-          const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
-          const peerSocketId = userSocketMap.getSocketId(peerUserId);
+              const calleeSocketId = userSocketMap.getSocketId(activeSession.calleeId);
+              if (calleeSocketId) {
+                io.to(calleeSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                  callCode: activeSession.callCode,
+                  durationSeconds: 0,
+                  reason: 'caller_left',
+                });
+              }
+            } catch (err) {
+              logger.error('Error handling caller disconnect during ringing:', err.message);
+            }
+          } else {
+            // Callee disconnected while call is ringing:
+            logger.debug(`Callee disconnected during ringing [callCode: ${activeSession.callCode}]`);
+            callSessionManager.clearRingingTimer(activeSession);
+            callSessionManager.endSession(activeSession.callCode);
 
-          if (peerSocketId) {
-            io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+            try {
+              await pool.query(
+                `UPDATE call_sessions 
+                 SET status = 'missed', end_reason = 'network_error', duration_seconds = 0, ended_at = CURRENT_TIMESTAMP 
+                 WHERE call_code = $1;`,
+                [activeSession.callCode]
+              );
+
+              const callerSocketId = userSocketMap.getSocketId(activeSession.callerId);
+              if (callerSocketId) {
+                io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                  callCode: activeSession.callCode,
+                  durationSeconds: 0,
+                  reason: 'network_error',
+                });
+                io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_NONE_AVAILABLE, {
+                  error: 'no_users_available',
+                  message: 'Partner disconnected before answering.',
+                });
+              }
+            } catch (err) {
+              logger.error('Error handling callee disconnect during ringing:', err.message);
+            }
+          }
+        } else {
+          // Connected session:
+          logger.debug(`User disconnected during connected call [callCode: ${activeSession.callCode}]`);
+
+          try {
+            const res = await endCall({
               callCode: activeSession.callCode,
-              durationSeconds: res.durationSeconds,
+              userId,
               reason: 'network_error',
             });
+
+            const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+            const peerSocketId = userSocketMap.getSocketId(peerUserId);
+
+            if (peerSocketId) {
+              io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                callCode: activeSession.callCode,
+                durationSeconds: res.durationSeconds,
+                reason: 'network_error',
+              });
+            }
+          } catch (err) {
+            logger.error('Error handling disconnect mid-call:', err.message);
           }
-        } catch (err) {
-          logger.error('Error handling disconnect mid-call:', err.message);
         }
       }
     });

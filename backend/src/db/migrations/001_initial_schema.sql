@@ -181,7 +181,8 @@ CREATE TABLE IF NOT EXISTS call_sessions (
     end_reason VARCHAR(32) NULL 
         CHECK (end_reason IN (
             'caller_hangup', 'callee_hangup', 'declined', 'ring_timeout', 
-            'skipped', 'balance_exhausted', 'network_error', 'system_shutdown'
+            'skipped', 'balance_exhausted', 'network_error', 'system_shutdown',
+            'caller_left', 'cancelled'
         )),
     billing_mode VARCHAR(20) NOT NULL DEFAULT 'free' CHECK (billing_mode IN ('free', 'subscription', 'per_minute')),
     amount_charged NUMERIC(10, 2) NOT NULL DEFAULT 0.00,

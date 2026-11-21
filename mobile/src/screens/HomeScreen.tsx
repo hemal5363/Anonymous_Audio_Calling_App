@@ -39,7 +39,6 @@ export default function HomeScreen() {
   // Ensure socket connection is actively established when user is authenticated on HomeScreen
   useEffect(() => {
     if (user && !isConnected) {
-      console.log('[HomeScreen] User authenticated, ensuring socket is connected...');
       connectSocket().catch((err) => {
         console.warn('[HomeScreen] connectSocket caught error:', err);
       });
@@ -186,7 +185,6 @@ export default function HomeScreen() {
           {!isConnected && socketError ? (
             <TouchableOpacity
               onPress={() => {
-                console.log('[HomeScreen] User requested socket reconnect');
                 connectSocket().catch(() => {});
               }}
               style={styles.retryPillButton}

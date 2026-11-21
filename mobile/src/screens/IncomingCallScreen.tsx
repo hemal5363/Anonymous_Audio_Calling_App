@@ -5,6 +5,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   SafeAreaView,
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { IncomingCallScreenNavigationProp } from '../navigation/types';
@@ -12,7 +13,7 @@ import { useCall } from '../call/CallContext';
 
 export default function IncomingCallScreen() {
   const navigation = useNavigation<IncomingCallScreenNavigationProp>();
-  const { callStatus, incomingCall, acceptIncoming, rejectIncoming } = useCall();
+  const { callStatus, incomingCall, acceptIncoming, rejectIncoming, lastEndInfo, clearEndInfo } = useCall();
 
   // Ring timer countdown (30s)
   const [secondsRemaining, setSecondsRemaining] = useState<number>(
@@ -34,14 +35,32 @@ export default function IncomingCallScreen() {
     return () => clearInterval(timer);
   }, [rejectIncoming]);
 
-  // Navigate when call state changes
+  // Navigate when call state changes (never navigate silently)
   useEffect(() => {
     if (callStatus === 'connected') {
       navigation.replace('InCall');
-    } else if (callStatus === 'idle' || callStatus === 'ended') {
-      navigation.replace('Home');
+    } else if (callStatus === 'ended') {
+      const reason = lastEndInfo?.reason;
+
+      const title = reason === 'caller_left' ? 'Call Cancelled' : 'Call Ended';
+      const message = lastEndInfo?.friendlyMessage || 'The incoming call has ended.';
+
+      Alert.alert(
+        title,
+        message,
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              clearEndInfo();
+              navigation.replace('Home');
+            },
+          },
+        ],
+        { cancelable: false }
+      );
     }
-  }, [callStatus, navigation]);
+  }, [callStatus, lastEndInfo, navigation, clearEndInfo]);
 
   const handleAccept = () => {
     acceptIncoming();

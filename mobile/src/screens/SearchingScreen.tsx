@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   Animated,
   SafeAreaView,
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { SearchingScreenNavigationProp } from '../navigation/types';
@@ -14,7 +15,7 @@ import { useCall } from '../call/CallContext';
 
 export default function SearchingScreen() {
   const navigation = useNavigation<SearchingScreenNavigationProp>();
-  const { callStatus, cancelFind } = useCall();
+  const { callStatus, cancelFind, lastEndInfo, clearEndInfo } = useCall();
 
   // Radar pulse animation
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -38,14 +39,42 @@ export default function SearchingScreen() {
     return () => pulseLoop.stop();
   }, [pulseAnim]);
 
-  // Navigate when call is matched or cancelled
+  // Navigate when call is matched or ends (never silently return to Home)
   useEffect(() => {
     if (callStatus === 'connected') {
       navigation.replace('InCall');
-    } else if (callStatus === 'idle' || callStatus === 'ended') {
-      navigation.replace('Home');
+    } else if (callStatus === 'ended') {
+      const reason = lastEndInfo?.reason;
+
+      let title = 'Call Ended';
+      if (reason === 'no_users_available') {
+        title = 'No Users Available';
+      } else if (reason === 'ring_timeout' || reason === 'missed') {
+        title = 'No Answer';
+      } else if (reason === 'caller_left') {
+        title = 'Call Cancelled';
+      } else if (reason === 'disconnected' || reason === 'network_error') {
+        title = 'Connection Disconnected';
+      }
+
+      const message = lastEndInfo?.friendlyMessage || 'Unable to connect to a partner right now. Please try again.';
+
+      Alert.alert(
+        title,
+        message,
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              clearEndInfo();
+              navigation.replace('Home');
+            },
+          },
+        ],
+        { cancelable: false }
+      );
     }
-  }, [callStatus, navigation]);
+  }, [callStatus, lastEndInfo, navigation, clearEndInfo]);
 
   const handleCancel = () => {
     cancelFind();

@@ -272,6 +272,11 @@ Coturn uses the standard **Time-Limited Long-Term Credential Mechanism** (`lt-cr
 3. Server halts duration timers, finalizes billing ledger rows, updates `call_sessions.status = 'ended'`, and broadcasts `call:ended` to both sockets.
 4. Both devices terminate peer connection and transition to the post-call feedback/safety screen.
 
+### 7.2.1 Cancel While Ringing (`caller_left`)
+1. Caller taps **Cancel** on the Searching screen while ringing or the caller's socket disconnects before the callee answers.
+2. Client emits `call:cancel` or `call:end { callCode, reason: "caller_left" }`.
+3. Server cancels the 30-second ringing timeout timer, ends the session immediately with `end_reason = 'caller_left'` (`duration_seconds = 0`), releases both users, and alerts the callee with `call:ended { reason: "caller_left" }`.
+
 ### 7.3 Skip Action (Instant Rematch)
 1. Caller taps **Skip**.
 2. Client sends `call:end { callCode, reason: "skipped" }`.
@@ -342,13 +347,15 @@ Billing checks are enforced before match initiation and continuously during call
   - Transaction B selects another available candidate C, or receives `none-available`.
   - No race condition or deadlock can occur.
 
-### 9.2 Network Drop / Socket Disconnect During Call
-- **Scenario:** A user loses internet connection or kills the app mid-call.
-- **Resolution:**
-  - Socket.IO fires `disconnect` event on the server.
-  - Server starts a **10-second reconnect grace timer**.
-  - If the socket reconnects and emits `presence:hello` with active `callCode`, the session resumes.
-  - If the timer expires: server concludes call with `call:ended { reason: "network_error" }`, alerts the remaining peer, and finalizes billing for elapsed minutes.
+### 9.2 Network Drop / Socket Disconnect & Transports
+- **Transports & Connection:**
+  - The mobile client connects with `transports: ['polling', 'websocket']` and `tryAllTransports: true`, starting on HTTP long-polling and upgrading immediately to WebSocket.
+  - The mobile client applies a **5-second disconnect grace period** before concluding a call if a socket drops mid-session. If the socket reconnects within the 5 seconds, the call remains active.
+- **Ringing Phase Disconnect:**
+  - If the caller's socket disconnects while the call is ringing, the session ends immediately with `end_reason = 'caller_left'`, clears the 30-second ring timeout, releases both users, and notifies the callee with `call:ended`.
+  - If the callee disconnects while ringing, the session is marked as `missed` with `end_reason = 'network_error'` and the caller receives `call:none-available`.
+- **Connected Phase Disconnect:**
+  - If a participant drops mid-call and the grace period expires, the call ends with `call:ended { reason: "network_error" }` and billing is recorded for actual elapsed seconds.
 
 ### 9.3 User Toggles Available Switch OFF Mid-Match
 - **Scenario:** Callee switches `is_available` to `false` right as a call is ringing.

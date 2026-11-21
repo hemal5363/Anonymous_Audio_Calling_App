@@ -9,6 +9,7 @@ export const SOCKET_EVENTS = {
   PRESENCE_HELLO: 'presence:hello',
   CALL_FIND: 'call:find',
   CALL_REQUEST: 'call:request',
+  CALL_CANCEL: 'call:cancel',
   CALL_RINGING: 'call:ringing',
   CALL_INCOMING: 'call:incoming',
   CALL_ACCEPT: 'call:accept',
@@ -98,11 +99,6 @@ export async function connectSocket(): Promise<Socket | null> {
 
   const formattedToken = accessToken.startsWith('Bearer ') ? accessToken : `Bearer ${accessToken}`;
 
-  console.log('[Socket] Initializing connection to URL:', API_URL);
-  console.log('[Socket] Path:', socketPath);
-  console.log('[Socket] Transports: ["polling", "websocket"] (tryAllTransports: true)');
-  console.log('[Socket] Token present, length:', accessToken.length);
-
   if (socketInstance) {
     // Update auth and headers on existing socket instance
     socketInstance.auth = { token: formattedToken };
@@ -113,11 +109,9 @@ export async function connectSocket(): Promise<Socket | null> {
       (socketInstance.io as any).opts.query = { token: formattedToken };
     }
     if (socketInstance.connected) {
-      console.log('[Socket] Already connected with socket ID:', socketInstance.id);
       notifyListeners(true, null);
       return socketInstance;
     }
-    console.log('[Socket] Existing socket was disconnected. Calling socket.connect()...');
     socketInstance.connect();
     return socketInstance;
   }
@@ -145,31 +139,28 @@ export async function connectSocket(): Promise<Socket | null> {
   });
 
   socketInstance.on('connect', () => {
-    console.log('[Socket] CONNECTED successfully! Socket ID:', socketInstance?.id);
     notifyListeners(true, null);
     // Send presence handshake upon connecting
     socketInstance?.emit(SOCKET_EVENTS.PRESENCE_HELLO);
   });
 
-  socketInstance.on('presence:ack', (payload) => {
-    console.log('[Socket] Presence acknowledged by server:', payload);
+  socketInstance.on('presence:ack', () => {
+    // Presence confirmed by server
   });
 
   socketInstance.on('connect_error', (err: any) => {
     const errorMsg = err?.message || 'Connection error';
     const description = err?.description ? ` (${typeof err.description === 'object' ? JSON.stringify(err.description) : err.description})` : '';
     const fullMsg = `${errorMsg}${description}`;
-    console.error('[Socket] CONNECT_ERROR:', fullMsg, err);
+    console.error('[Socket] CONNECT_ERROR:', fullMsg);
     notifyListeners(false, fullMsg);
   });
 
   socketInstance.on('disconnect', (reason: string) => {
-    console.log('[Socket] DISCONNECTED, reason:', reason);
     notifyListeners(false, reason === 'io client disconnect' ? null : `Disconnected: ${reason}`);
   });
 
-  socketInstance.on('reconnect_attempt', async (attempt: number) => {
-    console.log('[Socket] Reconnect attempt #', attempt);
+  socketInstance.on('reconnect_attempt', async () => {
     const freshToken = await tokenStorage.getAccessToken();
     if (freshToken && socketInstance) {
       const freshFormatted = freshToken.startsWith('Bearer ') ? freshToken : `Bearer ${freshToken}`;
@@ -197,7 +188,6 @@ export function getSocket(): Socket | null {
  */
 export function disconnectSocket(): void {
   if (socketInstance) {
-    console.log('[Socket] Disconnecting socket instance manually.');
     socketInstance.removeAllListeners();
     socketInstance.disconnect();
     socketInstance = null;

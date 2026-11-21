@@ -12,10 +12,8 @@ export async function socketAuthMiddleware(socket, next) {
   try {
     const handshake = socket.handshake;
     const transport = socket.conn?.transport?.name || 'unknown';
-    const remoteAddress = socket.handshake.address || socket.conn?.remoteAddress || 'unknown';
-    const origin = handshake.headers?.origin || 'no-origin';
 
-    logger.info(`[Socket Auth] Incoming handshake attempt: [socketId: ${socket.id}, transport: ${transport}, origin: ${origin}, ip: ${remoteAddress}]`);
+    logger.debug(`[Socket Auth] Incoming handshake attempt: [socketId: ${socket.id}, transport: ${transport}]`);
 
     // Detect and log token source
     let tokenSource = null;
@@ -33,11 +31,11 @@ export async function socketAuthMiddleware(socket, next) {
     }
 
     if (!rawToken) {
-      logger.warn(`[Socket Auth REJECTED] Reason: Token is required [socketId: ${socket.id}, ip: ${remoteAddress}, tokenSource: none]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: Token is required [socketId: ${socket.id}]`);
       return next(new Error('Authentication error: Token is required'));
     }
 
-    logger.info(`[Socket Auth] Token detected from source: "${tokenSource}" [socketId: ${socket.id}]`);
+    logger.debug(`[Socket Auth] Token detected from source: "${tokenSource}" [socketId: ${socket.id}]`);
 
     const token = rawToken.startsWith('Bearer ') ? rawToken.slice(7).trim() : rawToken.trim();
 
@@ -45,12 +43,12 @@ export async function socketAuthMiddleware(socket, next) {
     try {
       decoded = verifyAccessToken(token);
     } catch (err) {
-      logger.warn(`[Socket Auth REJECTED] Reason: Invalid or expired token [socketId: ${socket.id}, source: ${tokenSource}, error: ${err.message}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: Invalid or expired token [socketId: ${socket.id}, error: ${err.message}]`);
       return next(new Error('Authentication error: Invalid or expired token'));
     }
 
     if (!decoded || !decoded.userId) {
-      logger.warn(`[Socket Auth REJECTED] Reason: Malformed token payload [socketId: ${socket.id}, source: ${tokenSource}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: Malformed token payload [socketId: ${socket.id}]`);
       return next(new Error('Authentication error: Malformed token payload'));
     }
 
@@ -61,7 +59,7 @@ export async function socketAuthMiddleware(socket, next) {
     );
 
     if (rows.length === 0) {
-      logger.warn(`[Socket Auth REJECTED] Reason: User not found in DB [userId: ${decoded.userId}, socketId: ${socket.id}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: User not found in DB [socketId: ${socket.id}]`);
       return next(new Error('Authentication error: User not found'));
     }
 
@@ -69,17 +67,17 @@ export async function socketAuthMiddleware(socket, next) {
 
     // Reject banned or suspended users
     if (user.status === 'banned') {
-      logger.warn(`[Socket Auth REJECTED] Reason: User is banned [userId: ${user.id}, socketId: ${socket.id}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: User is banned [socketId: ${socket.id}]`);
       return next(new Error('Authentication error: User account is banned'));
     }
 
     if (user.status === 'suspended') {
-      logger.warn(`[Socket Auth REJECTED] Reason: User is suspended [userId: ${user.id}, socketId: ${socket.id}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: User is suspended [socketId: ${socket.id}]`);
       return next(new Error('Authentication error: User account is suspended'));
     }
 
     if (user.status !== 'active') {
-      logger.warn(`[Socket Auth REJECTED] Reason: User account is not active (${user.status}) [userId: ${user.id}, socketId: ${socket.id}]`);
+      logger.debug(`[Socket Auth REJECTED] Reason: User account is not active (${user.status}) [socketId: ${socket.id}]`);
       return next(new Error(`Authentication error: User account status is ${user.status}`));
     }
 
@@ -87,7 +85,7 @@ export async function socketAuthMiddleware(socket, next) {
     socket.user = user;
     socket.userId = user.id;
 
-    logger.info(`[Socket Auth SUCCESS] User authenticated: [userId: ${user.id}, socketId: ${socket.id}, source: ${tokenSource}]`);
+    logger.debug(`[Socket Auth SUCCESS] User authenticated: [socketId: ${socket.id}, source: ${tokenSource}]`);
     return next();
   } catch (error) {
     logger.error('[Socket Auth REJECTED] Reason: Internal server error:', error.message);

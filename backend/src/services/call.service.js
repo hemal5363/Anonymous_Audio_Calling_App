@@ -61,7 +61,7 @@ export async function acceptCall({ callCode, calleeId }) {
     logger.warn('Failed to update call_session status to connected in DB:', err.message);
   }
 
-  logger.info(`Call accepted and connected: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
+  logger.debug(`Call accepted and connected: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
 
   return {
     success: true,
@@ -121,7 +121,7 @@ export async function declineCall({ callCode, calleeId, reason = 'declined' }) {
     logger.warn('Failed to update call_session to declined in DB:', err.message);
   }
 
-  logger.info(`Call declined: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
+  logger.debug(`Call declined: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
 
   return {
     success: true,
@@ -153,7 +153,7 @@ export async function handleRingingTimeout({ callCode }) {
     logger.warn('Failed to update call_session to missed in DB:', err.message);
   }
 
-  logger.info(`Call marked missed due to ringing timeout: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
+  logger.debug(`Call marked missed due to ringing timeout: [callCode: ${callCode}, sessionId: ${session.sessionId}]`);
 
   return {
     success: true,
@@ -203,7 +203,11 @@ export async function endCall({ callCode, userId, reason = null }) {
   // Determine valid end reason
   let finalReason = reason;
   if (!finalReason) {
-    finalReason = userId === callerId ? 'caller_hangup' : 'callee_hangup';
+    if (session?.status === 'ringing' && !session?.connectedAt && userId === callerId) {
+      finalReason = 'caller_left';
+    } else {
+      finalReason = userId === callerId ? 'caller_hangup' : 'callee_hangup';
+    }
   }
 
   // Update DB with duration and end reason by call_code
@@ -218,7 +222,7 @@ export async function endCall({ callCode, userId, reason = null }) {
     logger.warn('Failed to update call_session to ended in DB:', err.message);
   }
 
-  logger.info(`Call ended: [callCode: ${callCode}, sessionId: ${sessionId}, duration: ${durationSeconds}s, reason: ${finalReason}]`);
+  logger.debug(`Call ended: [callCode: ${callCode}, sessionId: ${sessionId}, duration: ${durationSeconds}s, reason: ${finalReason}]`);
 
   return {
     success: true,
