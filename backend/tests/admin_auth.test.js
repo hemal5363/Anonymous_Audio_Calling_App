@@ -298,4 +298,55 @@ describe('Admin Authorization & Endpoints', () => {
       expect(res.body.pagination.total).toBe(1);
     });
   });
+
+  describe('CORS and Origin Configuration', () => {
+    it('allows CORS preflight for Admin panel origin http://localhost:5173', async () => {
+      const res = await request(app)
+        .options('/admin/auth/login')
+        .set('Origin', 'http://localhost:5173')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('allows CORS preflight for Admin panel origin http://127.0.0.1:5173', async () => {
+      const res = await request(app)
+        .options('/admin/auth/login')
+        .set('Origin', 'http://127.0.0.1:5173')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://127.0.0.1:5173');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('allows CORS preflight for Expo dev origin http://localhost:8081', async () => {
+      const res = await request(app)
+        .options('/auth/login')
+        .set('Origin', 'http://localhost:8081')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:8081');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('allows CORS preflight for Expo dev origin http://127.0.0.1:8081', async () => {
+      const res = await request(app)
+        .options('/auth/login')
+        .set('Origin', 'http://127.0.0.1:8081')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://127.0.0.1:8081');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('denies CORS preflight for unauthorized origins', async () => {
+      const res = await request(app)
+        .options('/admin/auth/login')
+        .set('Origin', 'http://malicious-website.com')
+        .set('Access-Control-Request-Method', 'POST');
+
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+  });
 });

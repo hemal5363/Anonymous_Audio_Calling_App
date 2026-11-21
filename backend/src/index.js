@@ -21,11 +21,11 @@ async function bootstrap() {
   const httpServer = http.createServer(app);
   const io = initSocketServer(httpServer);
 
-  // Start server listening on 0.0.0.0
-  httpServer.listen(config.port, '0.0.0.0', () => {
-    logger.info(`Server is listening on port ${config.port} (http://127.0.0.1:${config.port})`);
-    logger.info(`Socket.io initialized on same server (ws://127.0.0.1:${config.port}/socket.io/)`);
-    logger.info(`Health check endpoint: http://127.0.0.1:${config.port}/health`);
+  // Start server listening on host configured in environment (default 0.0.0.0)
+  httpServer.listen(config.port, config.host, () => {
+    logger.info(`Server is listening on ${config.host}:${config.port} (http://${config.host === '0.0.0.0' ? '127.0.0.1' : config.host}:${config.port})`);
+    logger.info(`Socket.io initialized on same server (ws://${config.host === '0.0.0.0' ? '127.0.0.1' : config.host}:${config.port}/socket.io/)`);
+    logger.info(`Health check endpoint: http://${config.host === '0.0.0.0' ? '127.0.0.1' : config.host}:${config.port}/health`);
   });
 
   // Graceful shutdown handling

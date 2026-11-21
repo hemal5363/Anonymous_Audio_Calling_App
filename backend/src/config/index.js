@@ -5,6 +5,7 @@ import { z } from 'zod';
 dotenv.config();
 
 const envSchema = z.object({
+  HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
@@ -15,7 +16,8 @@ const envSchema = z.object({
   TURN_SERVER_TCP_URL: z.string().default('turn:turn.example.com:3478?transport=tcp'),
   TURN_USERNAME: z.string().default('turn_user'),
   TURN_CREDENTIAL: z.string().default('turn_secret_password'),
-  ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5173'),
+  ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5173,http://127.0.0.1:5173'),
+  EXPO_DEV_ORIGIN: z.string().default('http://localhost:8081,http://127.0.0.1:8081'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -26,6 +28,7 @@ if (!parsed.success) {
 }
 
 export const config = {
+  host: parsed.data.HOST,
   port: parsed.data.PORT,
   env: parsed.data.NODE_ENV,
   db: {
@@ -37,11 +40,17 @@ export const config = {
   },
   cors: {
     adminOrigin: parsed.data.ADMIN_CORS_ORIGIN,
+    expoOrigin: parsed.data.EXPO_DEV_ORIGIN,
     getAllowedOrigins() {
-      return parsed.data.ADMIN_CORS_ORIGIN
+      const adminOrigins = (parsed.data.ADMIN_CORS_ORIGIN || '')
         .split(',')
-        .map((s) => s.trim())
+        .map((s) => s.trim().replace(/\/$/, ''))
         .filter(Boolean);
+      const expoOrigins = (parsed.data.EXPO_DEV_ORIGIN || '')
+        .split(',')
+        .map((s) => s.trim().replace(/\/$/, ''))
+        .filter(Boolean);
+      return Array.from(new Set([...adminOrigins, ...expoOrigins]));
     },
   },
   webrtc: {

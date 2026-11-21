@@ -28,9 +28,20 @@ let ioInstance = null;
  */
 export function initSocketServer(httpServer) {
   const allowedOrigins = config.cors.getAllowedOrigins();
+  const isWildcard = allowedOrigins.includes('*');
   const io = new Server(httpServer, {
     cors: {
-      origin: allowedOrigins.includes('*') ? '*' : allowedOrigins,
+      origin: isWildcard
+        ? '*'
+        : (origin, callback) => {
+            if (!origin) return callback(null, true);
+            const cleanOrigin = origin.replace(/\/$/, '');
+            const allowed = config.cors.getAllowedOrigins();
+            if (allowed.includes('*') || allowed.includes(cleanOrigin) || allowed.includes(origin)) {
+              return callback(null, true);
+            }
+            return callback(new Error('Not allowed by CORS'));
+          },
       methods: ['GET', 'POST'],
       credentials: true,
     },

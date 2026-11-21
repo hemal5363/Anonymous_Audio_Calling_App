@@ -23,8 +23,13 @@ const corsOptions = {
     if (!origin) {
       return callback(null, true);
     }
+    const cleanOrigin = origin.replace(/\/$/, '');
     const allowedOrigins = config.cors.getAllowedOrigins();
-    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+    if (
+      allowedOrigins.includes('*') ||
+      allowedOrigins.includes(cleanOrigin) ||
+      allowedOrigins.includes(origin)
+    ) {
       return callback(null, true);
     }
     return callback(null, false);
