@@ -6,11 +6,15 @@ import {
   verifyOtp,
   refresh,
   logout,
+  getAuthConfig,
 } from '../controllers/auth.controller.js';
 import { authenticateUser } from '../middleware/auth.middleware.js';
 import { loginRateLimiter, otpRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
+
+// 2.7 Public Auth Configuration (feature flags e.g. mobile_login_enabled)
+router.get('/config', getAuthConfig);
 
 // 2.1 Register (Email & Password)
 router.post('/register', register);

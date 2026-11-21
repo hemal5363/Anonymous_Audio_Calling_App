@@ -4,11 +4,13 @@ import authRoutes from './auth.routes.js';
 import userRoutes from './user.routes.js';
 import callsRoutes from './calls.routes.js';
 import adminRoutes from './admin.routes.js';
+import { getAuthConfig } from '../controllers/auth.controller.js';
 
 const router = Router();
 
 // Routes
 router.use('/health', healthRoutes);
+router.get('/config/public', getAuthConfig);
 router.use('/auth', authRoutes);
 router.use('/user', userRoutes);
 router.use('/calls', callsRoutes);

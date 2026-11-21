@@ -10,6 +10,7 @@ import callsRoutes from './routes/calls.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import { config } from './config/index.js';
 import { getHealth } from './controllers/health.controller.js';
+import { getAuthConfig } from './controllers/auth.controller.js';
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use(globalLimiter);
 
 // Direct root endpoints (per API spec)
 app.get('/health', getHealth);
+app.get('/config/public', getAuthConfig);
 app.use('/auth', authRoutes);
 app.use('/user', userRoutes);
 app.use('/calls', callsRoutes);

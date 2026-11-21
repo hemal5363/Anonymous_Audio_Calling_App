@@ -227,7 +227,48 @@ Revokes the current refresh token and clears active device presence.
 
 ---
 
+### 2.7 Get Public Auth Configuration
+Retrieves public authentication capabilities and feature flags (such as whether mobile phone login is currently enabled).
+
+- **Method:** `GET`
+- **Path:** `/auth/config` (also available via `/config/public`)
+- **Auth Required:** None
+- **Request Body:** None
+- **Response Body (`200 OK`):**
+```json
+{
+  "mobile_login_enabled": false
+}
+```
+
+---
+
 ## 3. User Endpoints (`/user`)
+
+---
+
+### 3.0 Get Current User Profile
+Retrieves the profile of the currently authenticated user.
+
+- **Method:** `GET`
+- **Path:** `/user/me` (alias `/user/profile`)
+- **Auth Required:** Bearer JWT User
+- **Request Body:** None
+- **Response Body (`200 OK`):**
+```json
+{
+  "user": {
+    "id": "e0b1f2e3-4c5d-6e7f-8a9b-0c1d2e3f4a5b",
+    "email": "user@example.com",
+    "phone": null,
+    "status": "active",
+    "is_available": false
+  }
+}
+```
+- **Error Codes:**
+  - `401 Unauthorized`: Missing or invalid access token.
+  - `403 Forbidden`: Account is suspended or banned.
 
 ---
 

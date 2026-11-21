@@ -274,4 +274,62 @@ describe('Auth Endpoints (POST /auth/register, /auth/login, /auth/refresh, /auth
       expect(res.body.message).toBe('Logged out successfully');
     });
   });
+
+  describe('GET /auth/config (Public Feature Flags)', () => {
+    it('should return mobile_login_enabled: false by default', async () => {
+      querySpy.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app).get('/auth/config');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ mobile_login_enabled: false });
+    });
+
+    it('should return mobile_login_enabled: true when setting is enabled in database', async () => {
+      querySpy.mockResolvedValueOnce({
+        rows: [{ value_json: { mobile_login_enabled: true } }],
+      });
+
+      const res = await request(app).get('/auth/config');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ mobile_login_enabled: true });
+    });
+
+    it('should also be accessible via GET /config/public alias', async () => {
+      querySpy.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app).get('/config/public');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ mobile_login_enabled: false });
+    });
+  });
+
+  describe('GET /user/me (User Profile)', () => {
+    it('should return 401 Unauthorized when unauthenticated', async () => {
+      const res = await request(app).get('/user/me');
+      expect(res.status).toBe(401);
+    });
+
+    it('should return user profile when authenticated', async () => {
+      const user = {
+        id: 'user-id-555',
+        email: 'user555@example.com',
+        phone: null,
+        status: 'active',
+        is_available: false,
+      };
+      const token = generateAccessToken(user);
+
+      querySpy.mockResolvedValueOnce({ rows: [user] });
+
+      const res = await request(app)
+        .get('/user/me')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.user).toBeDefined();
+      expect(res.body.user.id).toBe(user.id);
+      expect(res.body.user.email).toBe(user.email);
+      expect(res.body.user.is_available).toBe(false);
+    });
+  });
 });

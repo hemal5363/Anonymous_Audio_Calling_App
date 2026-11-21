@@ -53,6 +53,22 @@ async function isMobileLoginEnabled() {
 }
 
 /**
+ * 2.7 Public Auth Configuration
+ * GET /auth/config
+ * Returns public configuration flags (e.g. mobile_login_enabled)
+ */
+export async function getAuthConfig(req, res, next) {
+  try {
+    const mobileEnabled = await isMobileLoginEnabled();
+    return res.status(200).json({
+      mobile_login_enabled: mobileEnabled,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * 2.1 Register User (Email & Password)
  */
 export async function register(req, res, next) {

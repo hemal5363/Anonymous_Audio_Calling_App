@@ -33,6 +33,16 @@ const reportSchema = z.object({
 });
 
 /**
+ * 3.0 Get Current User Profile
+ * GET /user/me
+ */
+export async function getMe(req, res) {
+  return res.status(200).json({
+    user: req.user,
+  });
+}
+
+/**
  * 3.1 Toggle Availability Switch
  * PUT /user/availability
  */

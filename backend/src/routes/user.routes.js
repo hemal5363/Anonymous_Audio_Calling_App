@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  getMe,
   toggleAvailability,
   savePushToken,
   blockUser,
@@ -14,6 +15,10 @@ const router = Router();
 
 // All user routes strictly require authentication
 router.use(authenticateUser);
+
+// 3.0 Get Current User Profile
+router.get('/me', getMe);
+router.get('/profile', getMe);
 
 // 3.1 Toggle Availability
 router.put('/availability', toggleAvailability);
