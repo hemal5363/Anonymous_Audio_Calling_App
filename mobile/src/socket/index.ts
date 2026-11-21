@@ -32,13 +32,58 @@ export const SOCKET_EVENTS = {
   BILLING_WARNING: 'billing:warning',
 } as const;
 
+type StatusListener = (connected: boolean) => void;
+const statusListeners = new Set<StatusListener>();
+
 let socketInstance: Socket | null = null;
+let isSocketConnected = false;
+
+function notifyListeners(connected: boolean) {
+  isSocketConnected = connected;
+  statusListeners.forEach((listener) => {
+    try {
+      listener(connected);
+    } catch {
+      // Ignore listener error
+    }
+  });
+}
+
+/**
+ * Subscribe to socket connection state changes
+ */
+export function subscribeSocketStatus(listener: StatusListener): () => void {
+  statusListeners.add(listener);
+  // Immediately emit current state
+  listener(isSocketConnected);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+/**
+ * Current synchronous socket connection state
+ */
+export function getIsSocketConnected(): boolean {
+  return isSocketConnected && Boolean(socketInstance?.connected);
+}
 
 /**
  * Establishes an authenticated WebSocket connection with the backend
  */
 export async function connectSocket(): Promise<Socket> {
-  if (socketInstance?.connected) {
+  if (socketInstance) {
+    if (socketInstance.connected) {
+      notifyListeners(true);
+      return socketInstance;
+    }
+    const token = await tokenStorage.getAccessToken();
+    if (token) {
+      socketInstance.auth = {
+        token: `Bearer ${token}`,
+      };
+    }
+    socketInstance.connect();
     return socketInstance;
   }
 
@@ -51,13 +96,34 @@ export async function connectSocket(): Promise<Socket> {
       token: accessToken ? `Bearer ${accessToken}` : '',
     },
     reconnection: true,
-    reconnectionAttempts: 10,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    timeout: 20000,
   });
 
   socketInstance.on('connect', () => {
+    notifyListeners(true);
     // Send presence handshake upon connecting
     socketInstance?.emit(SOCKET_EVENTS.PRESENCE_HELLO);
+  });
+
+  socketInstance.on('reconnect_attempt', async () => {
+    // Refresh auth token before reconnecting
+    const freshToken = await tokenStorage.getAccessToken();
+    if (socketInstance) {
+      socketInstance.auth = {
+        token: freshToken ? `Bearer ${freshToken}` : '',
+      };
+    }
+  });
+
+  socketInstance.on('disconnect', () => {
+    notifyListeners(false);
+  });
+
+  socketInstance.on('connect_error', () => {
+    notifyListeners(false);
   });
 
   socketInstance.connect();
@@ -72,11 +138,13 @@ export function getSocket(): Socket | null {
 }
 
 /**
- * Disconnects and resets socket instance
+ * Disconnects and resets socket instance cleanly
  */
 export function disconnectSocket(): void {
   if (socketInstance) {
+    socketInstance.removeAllListeners();
     socketInstance.disconnect();
     socketInstance = null;
   }
+  notifyListeners(false);
 }

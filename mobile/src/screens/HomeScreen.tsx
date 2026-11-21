@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,31 +8,92 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
+  SafeAreaView,
 } from 'react-native';
 import { useAuth } from '../auth/AuthContext';
+import { useSocket } from '../socket/useSocket';
 import { api } from '../api/client';
+import { SOCKET_EVENTS } from '../socket';
 
 export default function HomeScreen() {
   const { user, logout, updateUser } = useAuth();
-  const [togglingAvailability, setTogglingAvailability] = useState(false);
-  const [loggingOut, setLoggingOut] = useState(false);
+  const { socket, isConnected } = useSocket();
 
-  const isAvailable = Boolean(user?.is_available);
+  // Availability state
+  const [isAvailable, setIsAvailable] = useState<boolean>(Boolean(user?.is_available));
+  const [updatingAvailability, setUpdatingAvailability] = useState<boolean>(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
 
-  const handleToggleAvailability = async (value: boolean) => {
-    setTogglingAvailability(true);
+  // Calling state
+  const [isCalling, setIsCalling] = useState<boolean>(false);
+  const [loggingOut, setLoggingOut] = useState<boolean>(false);
+
+  // Sync local availability state if context user changes
+  useEffect(() => {
+    setIsAvailable(Boolean(user?.is_available));
+  }, [user?.is_available]);
+
+  // Handle Availability Toggle with automatic rollback on error
+  const handleToggleAvailability = async (nextValue: boolean) => {
+    setAvailabilityError(null);
+    const previousValue = isAvailable;
+
+    // Optimistically set the switch UI
+    setIsAvailable(nextValue);
+    setUpdatingAvailability(true);
+
     try {
       const res = await api.put<{ is_available: boolean }>('/user/availability', {
-        is_available: value,
+        is_available: nextValue,
       });
+
+      // Confirm with server response
+      setIsAvailable(res.is_available);
       updateUser({ is_available: res.is_available });
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Could not update availability.');
+      // Revert switch to previous state
+      setIsAvailable(previousValue);
+      const errorMsg =
+        err?.message || 'Failed to update availability. Please check your connection and try again.';
+      setAvailabilityError(errorMsg);
+      Alert.alert('Availability Error', errorMsg);
     } finally {
-      setTogglingAvailability(false);
+      setUpdatingAvailability(false);
     }
   };
 
+  // Handle Call button press (enabled only when socket is connected)
+  const handleCallPress = () => {
+    if (!isConnected || !socket) {
+      Alert.alert('Connection Required', 'Connecting to call server. Please wait a moment.');
+      return;
+    }
+
+    setIsCalling(true);
+
+    // Emit call:find request to backend
+    socket.emit(SOCKET_EVENTS.CALL_FIND, (ack: any) => {
+      setIsCalling(false);
+      if (ack && !ack.success) {
+        if (ack.error === 'no_users_available') {
+          Alert.alert(
+            'No Users Available',
+            'No matching users are available right now. Please try again in a few moments.'
+          );
+        } else {
+          Alert.alert('Call Failed', ack.message || 'Could not initiate call.');
+        }
+      }
+    });
+
+    // Provide immediate user feedback
+    Alert.alert(
+      'Searching for Partner',
+      'Looking for an available anonymous partner. Your identity remains 100% private.'
+    );
+  };
+
+  // Handle Logout confirmation
   const handleLogoutPress = () => {
     Alert.alert(
       'Log Out',
@@ -56,97 +117,163 @@ export default function HomeScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Top Bar */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.appTitle}>Anonymous Audio</Text>
-          <Text style={styles.userIdText}>
-            Logged in as: {user?.email || user?.phone || 'Anonymous'}
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={styles.logoutButton}
-          onPress={handleLogoutPress}
-          disabled={loggingOut}
-        >
-          {loggingOut ? (
-            <ActivityIndicator size="small" color="#f87171" />
-          ) : (
-            <Text style={styles.logoutButtonText}>Log Out</Text>
-          )}
-        </TouchableOpacity>
-      </View>
-
-      {/* Availability Card */}
-      <View style={styles.card}>
-        <View style={styles.cardRow}>
-          <View style={styles.cardInfo}>
-            <Text style={styles.cardTitle}>Available for Calls</Text>
-            <Text style={styles.cardSubtitle}>
-              When ON, other users can connect with you.
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+        {/* Top App Bar */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.brandTitle}>Anonymous Audio</Text>
+            <Text style={styles.brandSubtitle}>
+              Logged in as: {user?.email || user?.phone || 'Anonymous'}
             </Text>
           </View>
-          {togglingAvailability ? (
-            <ActivityIndicator size="small" color="#38bdf8" />
-          ) : (
-            <Switch
-              value={isAvailable}
-              onValueChange={handleToggleAvailability}
-              trackColor={{ false: '#334155', true: '#2563eb' }}
-              thumbColor={isAvailable ? '#38bdf8' : '#94a3b8'}
-            />
+
+          <TouchableOpacity
+            style={styles.logoutButton}
+            onPress={handleLogoutPress}
+            disabled={loggingOut}
+            activeOpacity={0.7}
+          >
+            {loggingOut ? (
+              <ActivityIndicator size="small" color="#f87171" />
+            ) : (
+              <Text style={styles.logoutButtonText}>Log Out</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* Server Connection Pill */}
+        <View style={styles.connectionStatusContainer}>
+          <View
+            style={[
+              styles.connectionDot,
+              isConnected ? styles.dotConnected : styles.dotConnecting,
+            ]}
+          />
+          <Text style={styles.connectionStatusText}>
+            {isConnected ? 'Server Connected' : 'Connecting to server...'}
+          </Text>
+          {!isConnected && (
+            <ActivityIndicator size="small" color="#f59e0b" style={styles.connectingSpinner} />
           )}
         </View>
 
-        <View style={styles.statusPillRow}>
-          <View style={[styles.statusDot, isAvailable ? styles.dotGreen : styles.dotGray]} />
-          <Text style={styles.statusPillText}>
-            Status: {isAvailable ? 'Available to receive calls' : 'Offline / Unavailable'}
+        {/* Availability Error Banner */}
+        {availabilityError ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorBannerText}>{availabilityError}</Text>
+          </View>
+        ) : null}
+
+        {/* Availability Card */}
+        <View style={styles.card}>
+          <View style={styles.cardRow}>
+            <View style={styles.cardTextContainer}>
+              <Text style={styles.cardTitle}>Available to receive calls</Text>
+              <Text style={styles.cardSubtitle}>
+                When ON, you can receive calls even when the app is closed.
+              </Text>
+            </View>
+
+            {updatingAvailability ? (
+              <ActivityIndicator size="small" color="#38bdf8" />
+            ) : (
+              <Switch
+                value={isAvailable}
+                onValueChange={handleToggleAvailability}
+                trackColor={{ false: '#334155', true: '#2563eb' }}
+                thumbColor={isAvailable ? '#38bdf8' : '#94a3b8'}
+                disabled={updatingAvailability}
+              />
+            )}
+          </View>
+
+          <View style={styles.cardStatusDivider}>
+            <View
+              style={[
+                styles.statusIndicatorDot,
+                isAvailable ? styles.dotGreen : styles.dotGray,
+              ]}
+            />
+            <Text style={styles.cardStatusLabel}>
+              Status: {isAvailable ? 'Available to receive calls' : 'Offline / Unavailable'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Central Call Zone */}
+        <View style={styles.callZone}>
+          <TouchableOpacity
+            style={[
+              styles.callButton,
+              isConnected ? styles.callButtonActive : styles.callButtonDisabled,
+            ]}
+            onPress={handleCallPress}
+            disabled={!isConnected || isCalling}
+            activeOpacity={0.8}
+          >
+            {isCalling ? (
+              <ActivityIndicator size="large" color="#ffffff" />
+            ) : (
+              <Text
+                style={[
+                  styles.callButtonText,
+                  !isConnected && styles.callButtonTextDisabled,
+                ]}
+              >
+                CALL
+              </Text>
+            )}
+          </TouchableOpacity>
+
+          <Text style={styles.callZoneSubtitle}>
+            {isConnected
+              ? 'Tap CALL to connect with an available partner'
+              : 'Waiting for server connection to enable calls...'}
           </Text>
         </View>
-      </View>
 
-      {/* Center Call Zone */}
-      <View style={styles.callZone}>
-        <TouchableOpacity style={styles.callCircle} activeOpacity={0.85}>
-          <Text style={styles.callCircleText}>CALL</Text>
-        </TouchableOpacity>
-        <Text style={styles.callSubtitle}>Tap CALL to connect with a random partner</Text>
-      </View>
-
-      {/* Privacy Banner */}
-      <View style={styles.privacyBanner}>
-        <Text style={styles.privacyTitle}>🔒 100% Anonymous</Text>
-        <Text style={styles.privacyBody}>
-          Your name, number, email, and IP address are never exposed to callers.
-        </Text>
-      </View>
-    </ScrollView>
+        {/* Strict Privacy Guarantee Box (Universal Design Rule: Zero Peer Identity) */}
+        <View style={styles.privacyBox}>
+          <Text style={styles.privacyHeader}>🔒 Strict Anonymity Guarantee</Text>
+          <Text style={styles.privacyText}>
+            • No name, email, phone number, or IP address is ever shown to peers.{'\n'}
+            • You are only identified as an "Anonymous Caller".{'\n'}
+            • All audio is encrypted and private.
+          </Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#0a0f1d',
+  },
   container: {
     flex: 1,
     backgroundColor: '#0a0f1d',
   },
   content: {
     padding: 20,
-    paddingTop: 30,
+    paddingTop: 16,
+    paddingBottom: 40,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 16,
   },
-  appTitle: {
+  brandTitle: {
     fontSize: 22,
-    fontWeight: 'bold',
+    fontWeight: '800',
     color: '#f8fafc',
+    letterSpacing: 0.5,
   },
-  userIdText: {
+  brandSubtitle: {
     fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
@@ -164,20 +291,71 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  connectionStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 18,
+  },
+  connectionDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  dotConnected: {
+    backgroundColor: '#22c55e',
+  },
+  dotConnecting: {
+    backgroundColor: '#f59e0b',
+  },
+  connectionStatusText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#cbd5e1',
+  },
+  connectingSpinner: {
+    marginLeft: 6,
+    transform: [{ scale: 0.7 }],
+  },
+  errorBanner: {
+    backgroundColor: '#450a0a',
+    borderWidth: 1,
+    borderColor: '#b91c1c',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  errorBannerText: {
+    color: '#fca5a5',
+    fontSize: 13,
+    lineHeight: 18,
+  },
   card: {
     backgroundColor: '#131b2e',
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 18,
     borderWidth: 1,
     borderColor: '#1e293b',
     marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 3,
   },
   cardRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  cardInfo: {
+  cardTextContainer: {
     flex: 1,
     marginRight: 16,
   },
@@ -190,8 +368,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#94a3b8',
     marginTop: 4,
+    lineHeight: 18,
   },
-  statusPillRow: {
+  cardStatusDivider: {
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 14,
@@ -199,7 +378,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#1e293b',
   },
-  statusDot: {
+  statusIndicatorDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
@@ -211,59 +390,72 @@ const styles = StyleSheet.create({
   dotGray: {
     backgroundColor: '#64748b',
   },
-  statusPillText: {
+  cardStatusLabel: {
     fontSize: 12,
     color: '#cbd5e1',
     fontWeight: '500',
   },
   callZone: {
     alignItems: 'center',
-    marginVertical: 40,
+    marginVertical: 36,
   },
-  callCircle: {
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: '#2563eb',
+  callButton: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
     justifyContent: 'center',
     alignItems: 'center',
+    elevation: 10,
+  },
+  callButtonActive: {
+    backgroundColor: '#2563eb',
     shadowColor: '#2563eb',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
     borderWidth: 4,
     borderColor: '#38bdf8',
   },
-  callCircleText: {
-    fontSize: 24,
-    fontWeight: '800',
+  callButtonDisabled: {
+    backgroundColor: '#1e293b',
+    borderWidth: 4,
+    borderColor: '#334155',
+    opacity: 0.6,
+  },
+  callButtonText: {
+    fontSize: 26,
+    fontWeight: '900',
     color: '#ffffff',
     letterSpacing: 2,
   },
-  callSubtitle: {
+  callButtonTextDisabled: {
+    color: '#64748b',
+  },
+  callZoneSubtitle: {
     fontSize: 13,
     color: '#94a3b8',
-    marginTop: 16,
+    marginTop: 18,
     textAlign: 'center',
+    maxWidth: 260,
+    lineHeight: 18,
   },
-  privacyBanner: {
+  privacyBox: {
     backgroundColor: '#0f172a',
-    borderRadius: 10,
-    padding: 14,
+    borderRadius: 12,
+    padding: 16,
     borderWidth: 1,
     borderColor: '#1e293b',
-    marginTop: 20,
+    marginTop: 16,
   },
-  privacyTitle: {
+  privacyHeader: {
     fontSize: 13,
     fontWeight: '700',
     color: '#38bdf8',
-    marginBottom: 4,
+    marginBottom: 6,
   },
-  privacyBody: {
+  privacyText: {
     fontSize: 12,
     color: '#94a3b8',
-    lineHeight: 18,
+    lineHeight: 20,
   },
 });
