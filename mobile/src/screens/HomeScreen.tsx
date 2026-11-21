@@ -10,28 +10,41 @@ import {
   ScrollView,
   SafeAreaView,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
+import { HomeScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
 import { useSocket } from '../socket/useSocket';
+import { useCall } from '../call/CallContext';
 import { api } from '../api/client';
-import { SOCKET_EVENTS } from '../socket';
 
 export default function HomeScreen() {
+  const navigation = useNavigation<HomeScreenNavigationProp>();
   const { user, logout, updateUser } = useAuth();
-  const { socket, isConnected } = useSocket();
+  const { isConnected } = useSocket();
+  const { callStatus, startFind, lastEndInfo, clearEndInfo } = useCall();
 
   // Availability state
   const [isAvailable, setIsAvailable] = useState<boolean>(Boolean(user?.is_available));
   const [updatingAvailability, setUpdatingAvailability] = useState<boolean>(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
 
-  // Calling state
-  const [isCalling, setIsCalling] = useState<boolean>(false);
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
 
   // Sync local availability state if context user changes
   useEffect(() => {
     setIsAvailable(Boolean(user?.is_available));
   }, [user?.is_available]);
+
+  // Navigate reactively to call screens based on active call status
+  useEffect(() => {
+    if (callStatus === 'searching') {
+      navigation.navigate('Searching');
+    } else if (callStatus === 'incoming') {
+      navigation.navigate('IncomingCall');
+    } else if (callStatus === 'connected') {
+      navigation.navigate('InCall');
+    }
+  }, [callStatus, navigation]);
 
   // Handle Availability Toggle with automatic rollback on error
   const handleToggleAvailability = async (nextValue: boolean) => {
@@ -64,33 +77,13 @@ export default function HomeScreen() {
 
   // Handle Call button press (enabled only when socket is connected)
   const handleCallPress = () => {
-    if (!isConnected || !socket) {
+    if (!isConnected) {
       Alert.alert('Connection Required', 'Connecting to call server. Please wait a moment.');
       return;
     }
 
-    setIsCalling(true);
-
-    // Emit call:find request to backend
-    socket.emit(SOCKET_EVENTS.CALL_FIND, (ack: any) => {
-      setIsCalling(false);
-      if (ack && !ack.success) {
-        if (ack.error === 'no_users_available') {
-          Alert.alert(
-            'No Users Available',
-            'No matching users are available right now. Please try again in a few moments.'
-          );
-        } else {
-          Alert.alert('Call Failed', ack.message || 'Could not initiate call.');
-        }
-      }
-    });
-
-    // Provide immediate user feedback
-    Alert.alert(
-      'Searching for Partner',
-      'Looking for an available anonymous partner. Your identity remains 100% private.'
-    );
+    // CallContext transitions status to 'searching' and emits call:find
+    startFind();
   };
 
   // Handle Logout confirmation
@@ -158,6 +151,25 @@ export default function HomeScreen() {
           )}
         </View>
 
+        {/* Call Finished / End Reason Banner */}
+        {lastEndInfo ? (
+          <View style={styles.endInfoCard}>
+            <View style={styles.endInfoHeaderRow}>
+              <Text style={styles.endInfoTitle}>ℹ️ Call Notification</Text>
+              <TouchableOpacity onPress={clearEndInfo} style={styles.dismissButton}>
+                <Text style={styles.dismissButtonText}>✕ Dismiss</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.endInfoMessage}>{lastEndInfo.friendlyMessage}</Text>
+            {lastEndInfo.durationSeconds ? (
+              <Text style={styles.endInfoDuration}>
+                Call duration: {Math.floor(lastEndInfo.durationSeconds / 60)}m{' '}
+                {lastEndInfo.durationSeconds % 60}s
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+
         {/* Availability Error Banner */}
         {availabilityError ? (
           <View style={styles.errorBanner}>
@@ -209,21 +221,17 @@ export default function HomeScreen() {
               isConnected ? styles.callButtonActive : styles.callButtonDisabled,
             ]}
             onPress={handleCallPress}
-            disabled={!isConnected || isCalling}
+            disabled={!isConnected}
             activeOpacity={0.8}
           >
-            {isCalling ? (
-              <ActivityIndicator size="large" color="#ffffff" />
-            ) : (
-              <Text
-                style={[
-                  styles.callButtonText,
-                  !isConnected && styles.callButtonTextDisabled,
-                ]}
-              >
-                CALL
-              </Text>
-            )}
+            <Text
+              style={[
+                styles.callButtonText,
+                !isConnected && styles.callButtonTextDisabled,
+              ]}
+            >
+              CALL
+            </Text>
           </TouchableOpacity>
 
           <Text style={styles.callZoneSubtitle}>
@@ -323,6 +331,43 @@ const styles = StyleSheet.create({
   connectingSpinner: {
     marginLeft: 6,
     transform: [{ scale: 0.7 }],
+  },
+  endInfoCard: {
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+  },
+  endInfoHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  endInfoTitle: {
+    color: '#38bdf8',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  dismissButton: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  dismissButtonText: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  endInfoMessage: {
+    color: '#f8fafc',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  endInfoDuration: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 6,
   },
   errorBanner: {
     backgroundColor: '#450a0a',

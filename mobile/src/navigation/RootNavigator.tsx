@@ -7,6 +7,9 @@ import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
 import OtpVerifyScreen from '../screens/OtpVerifyScreen';
 import HomeScreen from '../screens/HomeScreen';
+import SearchingScreen from '../screens/SearchingScreen';
+import IncomingCallScreen from '../screens/IncomingCallScreen';
+import InCallScreen from '../screens/InCallScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -33,11 +36,28 @@ export default function RootNavigator() {
       }}
     >
       {isAuthenticated ? (
-        <Stack.Screen
-          name="Home"
-          component={HomeScreen}
-          options={{ headerShown: false }}
-        />
+        <>
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="Searching"
+            component={SearchingScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="IncomingCall"
+            component={IncomingCallScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="InCall"
+            component={InCallScreen}
+            options={{ headerShown: false }}
+          />
+        </>
       ) : (
         <>
           <Stack.Screen
