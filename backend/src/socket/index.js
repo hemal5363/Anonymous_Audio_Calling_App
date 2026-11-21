@@ -32,7 +32,19 @@ export function initSocketServer(httpServer) {
 
   const io = new Server(httpServer, {
     path: '/socket.io',
-    transports: ['websocket', 'polling'], // Allow both websocket and polling
+    transports: ['polling', 'websocket'], // Allow both polling and websocket, polling first
+    allowRequest: (req, callback) => {
+      const origin = req.headers.origin;
+      // Allow non-browser requests with no origin (curl, React Native, mobile apps)
+      if (!origin) return callback(null, true);
+      const cleanOrigin = origin.replace(/\/$/, '');
+      const allowed = config.cors.getAllowedOrigins();
+      if (allowed.includes('*') || allowed.includes(cleanOrigin) || allowed.includes(origin)) {
+        return callback(null, true);
+      }
+      logger.warn(`[Engine.IO allowRequest REJECTED] Origin "${origin}" rejected. Allowed origins: ${allowed.join(', ')}`);
+      return callback(403, false);
+    },
     cors: {
       origin: (origin, callback) => {
         // Non-browser or mobile clients (curl, React Native, Expo) may send no origin
@@ -50,6 +62,14 @@ export function initSocketServer(httpServer) {
     },
     pingTimeout: 20000,
     pingInterval: 25000,
+  });
+
+  // Log every engine-level connection error with code, message, and context
+  io.engine.on('connection_error', (err) => {
+    logger.error(
+      `[Engine.IO Connection Error] Code: ${err.code}, Message: "${err.message}", Req URL: ${err.req?.url}, Origin: ${err.req?.headers?.origin}, Transport: ${err.req?._query?.transport}, Remote IP: ${err.req?.socket?.remoteAddress || 'unknown'}, Context:`,
+      err.context
+    );
   });
 
   // Authenticate every socket connection with user's JWT access token

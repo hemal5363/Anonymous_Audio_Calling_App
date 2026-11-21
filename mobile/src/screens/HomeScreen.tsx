@@ -419,6 +419,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#0f172a',
     alignSelf: 'flex-start',
+    maxWidth: '100%',
+    flexWrap: 'wrap',
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 14,

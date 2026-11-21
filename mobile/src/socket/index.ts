@@ -100,13 +100,15 @@ export async function connectSocket(): Promise<Socket | null> {
 
   console.log('[Socket] Initializing connection to URL:', API_URL);
   console.log('[Socket] Path:', socketPath);
-  console.log('[Socket] Transports: ["websocket", "polling"]');
+  console.log('[Socket] Transports: ["polling", "websocket"] (tryAllTransports: true)');
   console.log('[Socket] Token present, length:', accessToken.length);
 
   if (socketInstance) {
     // Update auth and headers on existing socket instance
     socketInstance.auth = { token: formattedToken };
     if ((socketInstance.io as any)?.opts) {
+      (socketInstance.io as any).opts.transports = ['polling', 'websocket'];
+      (socketInstance.io as any).opts.tryAllTransports = true;
       (socketInstance.io as any).opts.extraHeaders = { Authorization: formattedToken };
       (socketInstance.io as any).opts.query = { token: formattedToken };
     }
@@ -120,10 +122,11 @@ export async function connectSocket(): Promise<Socket | null> {
     return socketInstance;
   }
 
-  // Create Socket.io client instance supporting both websocket and polling transports
+  // Create Socket.io client instance supporting both polling and websocket with tryAllTransports
   socketInstance = io(API_URL, {
     path: socketPath,
-    transports: ['websocket', 'polling'], // Allow both websocket and polling
+    transports: ['polling', 'websocket'], // Set polling first, then upgrade to websocket
+    tryAllTransports: true, // Try all transports when connection error occurs
     autoConnect: false,
     auth: {
       token: formattedToken,
@@ -152,10 +155,12 @@ export async function connectSocket(): Promise<Socket | null> {
     console.log('[Socket] Presence acknowledged by server:', payload);
   });
 
-  socketInstance.on('connect_error', (err: Error) => {
+  socketInstance.on('connect_error', (err: any) => {
     const errorMsg = err?.message || 'Connection error';
-    console.error('[Socket] CONNECT_ERROR:', errorMsg, err);
-    notifyListeners(false, errorMsg);
+    const description = err?.description ? ` (${typeof err.description === 'object' ? JSON.stringify(err.description) : err.description})` : '';
+    const fullMsg = `${errorMsg}${description}`;
+    console.error('[Socket] CONNECT_ERROR:', fullMsg, err);
+    notifyListeners(false, fullMsg);
   });
 
   socketInstance.on('disconnect', (reason: string) => {
