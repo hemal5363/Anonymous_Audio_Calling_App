@@ -14,6 +14,7 @@ import {
 } from '../services/call.service.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import { pushService, sendIncomingCallPush } from '../services/push.service.js';
 import {
   startCallBillingTimer,
   stopCallBillingTimer,
@@ -164,8 +165,9 @@ export function initSocketServer(httpServer) {
             role: 'callee',
             iceServers: config.webrtc.getIceServers(),
           });
-        } else if (callee.pushToken) {
-          logger.info(`[FCM Push Wake-up] Dispatched wake-up notification for callee in session: ${session.callCode}`);
+        } else {
+          // Callee has no active socket connection -> wake up via push notification
+          await pushService.sendIncomingCallPush(callee.pushToken, session.id);
         }
 
         if (ack) {
