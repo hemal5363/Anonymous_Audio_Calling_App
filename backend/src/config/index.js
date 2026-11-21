@@ -10,6 +10,11 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   JWT_SECRET: z.string().min(1, 'JWT_SECRET is required'),
   JWT_REFRESH_SECRET: z.string().min(1, 'JWT_REFRESH_SECRET is required'),
+  STUN_SERVER_URL: z.string().default('stun:stun.l.google.com:19302'),
+  TURN_SERVER_URL: z.string().default('turn:turn.example.com:3478?transport=udp'),
+  TURN_SERVER_TCP_URL: z.string().default('turn:turn.example.com:3478?transport=tcp'),
+  TURN_USERNAME: z.string().default('turn_user'),
+  TURN_CREDENTIAL: z.string().default('turn_secret_password'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -28,5 +33,22 @@ export const config = {
   jwt: {
     secret: parsed.data.JWT_SECRET,
     refreshSecret: parsed.data.JWT_REFRESH_SECRET,
+  },
+  webrtc: {
+    stunUrl: parsed.data.STUN_SERVER_URL,
+    turnUrl: parsed.data.TURN_SERVER_URL,
+    turnTcpUrl: parsed.data.TURN_SERVER_TCP_URL,
+    turnUsername: parsed.data.TURN_USERNAME,
+    turnCredential: parsed.data.TURN_CREDENTIAL,
+    getIceServers() {
+      return [
+        { urls: parsed.data.STUN_SERVER_URL },
+        {
+          urls: [parsed.data.TURN_SERVER_URL, parsed.data.TURN_SERVER_TCP_URL],
+          username: parsed.data.TURN_USERNAME,
+          credential: parsed.data.TURN_CREDENTIAL,
+        },
+      ];
+    },
   },
 };

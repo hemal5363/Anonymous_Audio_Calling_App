@@ -1,8 +1,18 @@
 import { Server } from 'socket.io';
 import { socketAuthMiddleware } from './socketAuth.middleware.js';
 import { userSocketMap } from './userSocketMap.js';
+import { callSessionManager } from './callSessionManager.js';
 import { SOCKET_EVENTS } from './events.js';
 import { matchCaller } from '../services/matching.service.js';
+import {
+  acceptCall,
+  declineCall,
+  handleRingingTimeout,
+  endCall,
+  blockPeerDuringCall,
+  reportPeerDuringCall,
+} from '../services/call.service.js';
+import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 
 let ioInstance = null;
@@ -33,14 +43,17 @@ export function initSocketServer(httpServer) {
 
     logger.info(`Socket connected: [socketId: ${socket.id}, userId: ${userId}, totalOnline: ${userSocketMap.getOnlineCount()}]`);
 
-    // 7.1 Presence & Setup
+    // -----------------------------------------------------------------------
+    // 1. Presence & Setup
+    // -----------------------------------------------------------------------
     socket.on(SOCKET_EVENTS.PRESENCE_HELLO, () => {
       logger.info(`Presence confirmed: [userId: ${userId}, socketId: ${socket.id}]`);
     });
 
-    // 7.2 Call Matching Logic (event "call:find" and alias "call:request")
+    // -----------------------------------------------------------------------
+    // 2. Call Matching Logic (event "call:find" & alias "call:request")
+    // -----------------------------------------------------------------------
     const handleCallFind = async (payload, callback) => {
-      // Support invocation with just a callback: socket.emit('call:find', callback)
       const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
 
       try {
@@ -68,7 +81,6 @@ export function initSocketServer(httpServer) {
             return;
           }
 
-          // Billing check failure or already in call
           socket.emit(SOCKET_EVENTS.CALL_ERROR, {
             error: matchResult.error,
             message: matchResult.message,
@@ -86,6 +98,38 @@ export function initSocketServer(httpServer) {
 
         const { session, callee } = matchResult;
 
+        // Register session in in-memory CallSessionManager with a 30s ringing timeout
+        callSessionManager.createSession({
+          sessionId: session.id,
+          callCode: session.callCode,
+          callerId: userId,
+          calleeId: callee.id,
+          billingMode: session.billingMode,
+          ringTimeoutMs: 30000,
+          onRingTimeout: async (s) => {
+            try {
+              await handleRingingTimeout({ callCode: s.callCode });
+              const endPayload = {
+                callCode: s.callCode,
+                durationSeconds: 0,
+                reason: 'ring_timeout',
+              };
+
+              io.to(`call:${s.callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+
+              const callerSockId = userSocketMap.getSocketId(s.callerId);
+              if (callerSockId) {
+                io.to(callerSockId).emit(SOCKET_EVENTS.CALL_NONE_AVAILABLE, {
+                  error: 'no_users_available',
+                  message: 'Call timed out with no answer.',
+                });
+              }
+            } catch (err) {
+              logger.error('Error handling ringing timeout:', err.message);
+            }
+          },
+        });
+
         // Join caller to isolated session room
         socket.join(`call:${session.callCode}`);
 
@@ -95,10 +139,10 @@ export function initSocketServer(httpServer) {
           callCode: session.callCode,
           status: session.status,
           role: 'caller',
+          iceServers: config.webrtc.getIceServers(),
         };
 
         socket.emit(SOCKET_EVENTS.CALL_RINGING, callerPayload);
-        socket.emit(SOCKET_EVENTS.CALL_MATCHED, callerPayload);
 
         // Notify callee if online via live socket
         const calleeSocketId = userSocketMap.getSocketId(callee.id);
@@ -108,12 +152,12 @@ export function initSocketServer(httpServer) {
             calleeSocket.join(`call:${session.callCode}`);
           }
 
-          // Callee receives anonymous incoming alert (strictly no caller personal details)
           io.to(calleeSocketId).emit(SOCKET_EVENTS.CALL_INCOMING, {
             sessionId: session.id,
             callCode: session.callCode,
             ringSeconds: 30,
             role: 'callee',
+            iceServers: config.webrtc.getIceServers(),
           });
         } else if (callee.pushToken) {
           logger.info(`[FCM Push Wake-up] Dispatched wake-up notification for callee in session: ${session.callCode}`);
@@ -125,6 +169,7 @@ export function initSocketServer(httpServer) {
             sessionId: session.id,
             callCode: session.callCode,
             status: session.status,
+            iceServers: config.webrtc.getIceServers(),
           });
         }
       } catch (err) {
@@ -147,40 +192,288 @@ export function initSocketServer(httpServer) {
     socket.on('call:find', handleCallFind);
     socket.on(SOCKET_EVENTS.CALL_REQUEST, handleCallFind);
 
-    socket.on(SOCKET_EVENTS.CALL_ACCEPT, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.CALL_ACCEPT} from user ${userId}`);
+    // -----------------------------------------------------------------------
+    // 3. Callee Accept & Reject (Decline)
+    // -----------------------------------------------------------------------
+    socket.on(SOCKET_EVENTS.CALL_ACCEPT, async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      const res = await acceptCall({ callCode, calleeId: userId });
+      if (!res.success) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, res);
+        if (ack) ack(res);
+        return;
+      }
+
+      // Both clients receive call:matched with ephemeral STUN/TURN ICE config
+      const callerPayload = {
+        callCode,
+        sessionId: res.sessionId,
+        role: 'caller',
+        iceServers: res.iceServers,
+      };
+
+      const calleePayload = {
+        callCode,
+        sessionId: res.sessionId,
+        role: 'callee',
+        iceServers: res.iceServers,
+      };
+
+      const callerSocketId = userSocketMap.getSocketId(res.callerId);
+      if (callerSocketId) {
+        io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_MATCHED, callerPayload);
+      }
+      socket.emit(SOCKET_EVENTS.CALL_MATCHED, calleePayload);
+
+      if (ack) ack({ success: true, callCode, sessionId: res.sessionId });
     });
 
-    socket.on(SOCKET_EVENTS.CALL_DECLINE, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.CALL_DECLINE} from user ${userId}`);
+    const handleDecline = async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+      const reason = payload?.reason || 'declined';
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      const res = await declineCall({ callCode, calleeId: userId, reason });
+      if (!res.success) {
+        if (ack) ack(res);
+        return;
+      }
+
+      io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
+        callCode,
+        durationSeconds: 0,
+        reason: 'declined',
+      });
+
+      if (ack) ack({ success: true });
+    };
+
+    socket.on(SOCKET_EVENTS.CALL_DECLINE, handleDecline);
+    socket.on(SOCKET_EVENTS.CALL_REJECT, handleDecline);
+
+    // -----------------------------------------------------------------------
+    // 4. WebRTC Signaling Relays (between matched users ONLY)
+    // -----------------------------------------------------------------------
+    const handleRelay = (eventName) => (payload) => {
+      const callCode = payload?.callCode;
+      if (!callCode) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'missing_call_code',
+          message: 'callCode is required for signaling',
+        });
+        return;
+      }
+
+      // Enforce strict security: reject relays from anyone not part of that session
+      if (!callSessionManager.isParticipant(callCode, userId)) {
+        logger.warn(`Unauthorized relay attempt rejected: [userId: ${userId}, callCode: ${callCode}, event: ${eventName}]`);
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'unauthorized_relay',
+          message: 'You are not an authorized participant of this call session.',
+        });
+        return;
+      }
+
+      const peerUserId = callSessionManager.getPeerUserId(callCode, userId);
+      if (!peerUserId) return;
+
+      const peerSocketId = userSocketMap.getSocketId(peerUserId);
+      if (peerSocketId) {
+        io.to(peerSocketId).emit(eventName, payload);
+      }
+    };
+
+    socket.on(SOCKET_EVENTS.SIGNAL_OFFER, handleRelay(SOCKET_EVENTS.SIGNAL_OFFER));
+    socket.on(SOCKET_EVENTS.SIGNAL_ANSWER, handleRelay(SOCKET_EVENTS.SIGNAL_ANSWER));
+    socket.on(SOCKET_EVENTS.SIGNAL_ICE, handleRelay(SOCKET_EVENTS.SIGNAL_ICE));
+
+    // -----------------------------------------------------------------------
+    // 5. In-Call Lifecycle, Skip, Mute, Report, Block, & End
+    // -----------------------------------------------------------------------
+    socket.on(SOCKET_EVENTS.CALL_CONNECTED, async (payload) => {
+      const callCode = payload?.callCode;
+      if (callCode && callSessionManager.isParticipant(callCode, userId)) {
+        callSessionManager.markConnected(callCode);
+        logger.info(`WebRTC connected event received for session: ${callCode}`);
+      }
     });
 
-    // WebRTC Signaling Relays
-    socket.on(SOCKET_EVENTS.SIGNAL_OFFER, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.SIGNAL_OFFER} from user ${userId}`);
+    // Call End
+    socket.on(SOCKET_EVENTS.CALL_END, async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+      const reason = payload?.reason;
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      if (!callSessionManager.isParticipant(callCode, userId)) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'unauthorized',
+          message: 'You are not an authorized participant in this call session.',
+        });
+        if (ack) ack({ success: false, error: 'unauthorized' });
+        return;
+      }
+
+      const res = await endCall({ callCode, userId, reason });
+      if (res.success) {
+        io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
+          callCode,
+          durationSeconds: res.durationSeconds,
+          reason: res.reason,
+        });
+
+        if (ack) ack({ success: true, durationSeconds: res.durationSeconds, reason: res.reason });
+      }
     });
 
-    socket.on(SOCKET_EVENTS.SIGNAL_ANSWER, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.SIGNAL_ANSWER} from user ${userId}`);
+    // Skip Action: end call and immediately search for a new match
+    const handleSkip = async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      const session = callSessionManager.getSession(callCode);
+      if (!session || session.callerId !== userId) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'unauthorized',
+          message: 'Only the caller can skip the call.',
+        });
+        if (ack) ack({ success: false, error: 'unauthorized' });
+        return;
+      }
+
+      // End current call with reason 'skipped'
+      const res = await endCall({ callCode, userId, reason: 'skipped' });
+
+      // Notify callee
+      const calleeSocketId = userSocketMap.getSocketId(session.calleeId);
+      if (calleeSocketId) {
+        io.to(calleeSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+          callCode,
+          durationSeconds: res.durationSeconds,
+          reason: 'skipped',
+        });
+      }
+
+      if (ack) ack({ success: true, skipped: true });
+
+      // Immediately search for next candidate
+      logger.info(`Caller ${userId} skipped call ${callCode}. Searching for next available match immediately...`);
+      await handleCallFind({}, null);
+    };
+
+    socket.on(SOCKET_EVENTS.CALL_SKIP, handleSkip);
+
+    // Mute State Relay
+    socket.on(SOCKET_EVENTS.CALL_MUTE, (payload) => {
+      const callCode = payload?.callCode;
+      const isMuted = Boolean(payload?.isMuted);
+
+      if (!callCode || !callSessionManager.isParticipant(callCode, userId)) {
+        return;
+      }
+
+      callSessionManager.setMuteState(callCode, userId, isMuted);
+      const peerUserId = callSessionManager.getPeerUserId(callCode, userId);
+      const peerSocketId = userSocketMap.getSocketId(peerUserId);
+
+      if (peerSocketId) {
+        io.to(peerSocketId).emit(SOCKET_EVENTS.PEER_MUTE, { callCode, isMuted });
+        io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_MUTE, { callCode, isMuted });
+      }
     });
 
-    socket.on(SOCKET_EVENTS.SIGNAL_ICE, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.SIGNAL_ICE} from user ${userId}`);
+    // In-Call Block
+    socket.on(SOCKET_EVENTS.CALL_BLOCK, async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      try {
+        const res = await blockPeerDuringCall({ callCode, blockerId: userId });
+        if (ack) ack(res);
+      } catch (err) {
+        if (ack) ack({ success: false, error: 'server_error', message: err.message });
+      }
     });
 
-    // In-Call Lifecycle & Billing
-    socket.on(SOCKET_EVENTS.CALL_CONNECTED, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.CALL_CONNECTED} from user ${userId}`);
+    // In-Call Report
+    socket.on(SOCKET_EVENTS.CALL_REPORT, async (payload, callback) => {
+      const ack = typeof callback === 'function' ? callback : null;
+      const callCode = payload?.callCode;
+      const reason = payload?.reason || 'other';
+      const note = payload?.note;
+
+      if (!callCode) {
+        if (ack) ack({ success: false, error: 'missing_call_code' });
+        return;
+      }
+
+      try {
+        const res = await reportPeerDuringCall({ callCode, reporterId: userId, reason, note });
+        if (ack) ack(res);
+      } catch (err) {
+        if (ack) ack({ success: false, error: 'server_error', message: err.message });
+      }
     });
 
-    socket.on(SOCKET_EVENTS.CALL_END, (payload) => {
-      logger.info(`[Socket] Event ${SOCKET_EVENTS.CALL_END} from user ${userId}`);
-    });
-
-    // Clean disconnect handling
-    socket.on('disconnect', (reason) => {
+    // -----------------------------------------------------------------------
+    // 6. Clean Disconnect Handling (release users & record network_error mid-call)
+    // -----------------------------------------------------------------------
+    socket.on('disconnect', async (reason) => {
       userSocketMap.removeBySocketId(socket.id);
       logger.info(`Socket disconnected: [socketId: ${socket.id}, userId: ${userId}, reason: ${reason}, remainingOnline: ${userSocketMap.getOnlineCount()}]`);
+
+      // Check if user is in an active session
+      const activeSession = callSessionManager.getSessionByUserId(userId);
+      if (activeSession) {
+        logger.info(`User ${userId} disconnected during active call session ${activeSession.callCode}. Concluding call with network_error.`);
+
+        try {
+          const res = await endCall({
+            callCode: activeSession.callCode,
+            userId,
+            reason: 'network_error',
+          });
+
+          const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+          const peerSocketId = userSocketMap.getSocketId(peerUserId);
+
+          if (peerSocketId) {
+            io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+              callCode: activeSession.callCode,
+              durationSeconds: res.durationSeconds,
+              reason: 'network_error',
+            });
+          }
+        } catch (err) {
+          logger.error('Error handling disconnect mid-call:', err.message);
+        }
+      }
     });
   });
 
@@ -198,4 +491,4 @@ export function getIO() {
   return ioInstance;
 }
 
-export { userSocketMap, SOCKET_EVENTS };
+export { userSocketMap, callSessionManager, SOCKET_EVENTS };

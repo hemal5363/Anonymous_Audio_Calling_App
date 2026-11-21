@@ -3,7 +3,7 @@ import http from 'node:http';
 import { io as ioClient } from 'socket.io-client';
 import app from '../src/app.js';
 import { pool } from '../src/db/index.js';
-import { initSocketServer, userSocketMap, SOCKET_EVENTS } from '../src/socket/index.js';
+import { initSocketServer, userSocketMap, callSessionManager, SOCKET_EVENTS } from '../src/socket/index.js';
 import { checkCallerBillingStanding } from '../src/services/billing.service.js';
 import { matchCaller } from '../src/services/matching.service.js';
 import { generateAccessToken } from '../src/utils/token.js';
@@ -47,6 +47,7 @@ describe('Matching Logic & Call Find Protocol', () => {
 
   beforeEach(() => {
     userSocketMap.clear();
+    callSessionManager.clear();
 
     mockClient = {
       query: jest.fn(),
@@ -58,6 +59,7 @@ describe('Matching Logic & Call Find Protocol', () => {
   });
 
   afterEach(() => {
+    callSessionManager.clear();
     jest.restoreAllMocks();
   });
 
@@ -260,7 +262,7 @@ describe('Matching Logic & Call Find Protocol', () => {
       const calleeToken = generateAccessToken(calleeUser);
 
       const mockSession = {
-        id: 'session-uuid-7777',
+        id: '77777777-7777-4777-a777-777777777777',
         call_code: 'code-uuid-8888',
         status: 'ringing',
         billing_mode: 'free',
