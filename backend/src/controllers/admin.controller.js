@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { generateAdminToken } from '../utils/token.js';
 import { logger } from '../utils/logger.js';
+import { userSocketMap } from '../socket/userSocketMap.js';
 
 // Schemas
 const adminLoginSchema = z.object({
@@ -466,7 +467,7 @@ export async function getStats(req, res, next) {
       overview: {
         total_registered_users: parseInt(totalUsersRes.rows[0].count, 10),
         active_users_today: parseInt(todayConnectedRes.rows[0].count, 10), // Users engaged in calls today
-        currently_online_sockets: 0, // In-memory socket count injected at gateway
+        currently_online_sockets: userSocketMap.getOnlineCount(),
         currently_available_users: parseInt(availableUsersRes.rows[0].count, 10),
         active_calls_now: parseInt(activeCallsRes.rows[0].count, 10),
       },
