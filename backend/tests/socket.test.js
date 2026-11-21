@@ -59,12 +59,14 @@ describe('Socket.IO Gateway & Authentication', () => {
   describe('Socket Event Names Definition', () => {
     it('should define exact event names matching docs/API_SPEC.md and docs/CALL_FLOW.md', () => {
       expect(SOCKET_EVENTS.PRESENCE_HELLO).toBe('presence:hello');
+      expect(SOCKET_EVENTS.CALL_FIND).toBe('call:find');
       expect(SOCKET_EVENTS.CALL_REQUEST).toBe('call:request');
       expect(SOCKET_EVENTS.CALL_RINGING).toBe('call:ringing');
       expect(SOCKET_EVENTS.CALL_INCOMING).toBe('call:incoming');
       expect(SOCKET_EVENTS.CALL_ACCEPT).toBe('call:accept');
       expect(SOCKET_EVENTS.CALL_DECLINE).toBe('call:decline');
       expect(SOCKET_EVENTS.CALL_NONE_AVAILABLE).toBe('call:none-available');
+      expect(SOCKET_EVENTS.NO_USERS_AVAILABLE).toBe('no_users_available');
       expect(SOCKET_EVENTS.CALL_MATCHED).toBe('call:matched');
       expect(SOCKET_EVENTS.SIGNAL_OFFER).toBe('signal:offer');
       expect(SOCKET_EVENTS.SIGNAL_ANSWER).toBe('signal:answer');

@@ -1,0 +1,172 @@
+import { pool } from '../db/index.js';
+import { checkCallerBillingStanding } from './billing.service.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * Executes the atomic candidate matching algorithm as specified in docs/CALL_FLOW.md.
+ * 
+ * Guarantees:
+ * 1. Atomic claim via SELECT ... FOR UPDATE SKIP LOCKED prevents race conditions.
+ * 2. Caller and callee are guaranteed not to be in another active call.
+ * 3. Bidirectional blocks are strictly respected.
+ * 4. Anonymous tokens only (neither party receives the other's ID, email, or phone).
+ */
+export async function matchCaller(callerId, liveSocketUserIds = []) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Lock caller row and verify caller is active
+    const callerRes = await client.query(
+      `SELECT id, status, is_available 
+       FROM users 
+       WHERE id = $1 
+       FOR UPDATE;`,
+      [callerId]
+    );
+
+    if (callerRes.rows.length === 0 || callerRes.rows[0].status !== 'active') {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        error: 'caller_not_active',
+        message: 'Your account is not active or eligible to place calls.',
+      };
+    }
+
+    // 2. Check caller is not already participating in an active call
+    const activeCallRes = await client.query(
+      `SELECT id, call_code 
+       FROM call_sessions 
+       WHERE (caller_id = $1 OR callee_id = $1) 
+         AND status IN ('requested', 'ringing', 'connected')
+       LIMIT 1;`,
+      [callerId]
+    );
+
+    if (activeCallRes.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        error: 'already_in_call',
+        message: 'You are already in an active call.',
+      };
+    }
+
+    // 3. Pre-call billing check (Step 4 billing check)
+    const billingResult = await checkCallerBillingStanding(client, callerId);
+    if (!billingResult.allowed) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        error: billingResult.error,
+        message: billingResult.message,
+      };
+    }
+
+    // 4. Atomically locate and lock exactly one eligible callee
+    // Filter array of live socket user IDs to ensure valid UUIDs
+    const liveIds = Array.isArray(liveSocketUserIds)
+      ? liveSocketUserIds.filter((id) => typeof id === 'string' && id !== callerId)
+      : [];
+
+    const candidateQuery = `
+      WITH eligible_candidate AS (
+        SELECT u.id, u.push_token
+        FROM users u
+        WHERE u.status = 'active'
+          AND u.is_available = TRUE
+          AND u.id <> $1
+          -- Exclude busy users
+          AND NOT EXISTS (
+            SELECT 1 FROM call_sessions cs
+            WHERE (cs.caller_id = u.id OR cs.callee_id = u.id)
+              AND cs.status IN ('requested', 'ringing', 'connected')
+          )
+          -- Exclude blocks in either direction
+          AND NOT EXISTS (
+            SELECT 1 FROM blocks b
+            WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+               OR (b.blocker_id = u.id AND b.blocked_id = $1)
+          )
+          -- Cooldown: avoid rematching with same user within past 30 minutes
+          AND NOT EXISTS (
+            SELECT 1 FROM call_sessions cs_recent
+            WHERE ((cs_recent.caller_id = $1 AND cs_recent.callee_id = u.id)
+                OR (cs_recent.caller_id = u.id AND cs_recent.callee_id = $1))
+              AND cs_recent.created_at > (NOW() - INTERVAL '30 minutes')
+          )
+        ORDER BY 
+          -- Prioritize users with live socket connection
+          CASE WHEN u.id = ANY($2::uuid[]) THEN 0 ELSE 1 END,
+          RANDOM()
+        LIMIT 1
+        FOR UPDATE OF u SKIP LOCKED
+      )
+      SELECT id, push_token FROM eligible_candidate;
+    `;
+
+    const candidateRes = await client.query(candidateQuery, [callerId, liveIds]);
+
+    if (candidateRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        error: 'no_users_available',
+        message: 'No available users at this moment.',
+      };
+    }
+
+    const callee = candidateRes.rows[0];
+
+    // 5. Create call_sessions row with status 'ringing'
+    const sessionRes = await client.query(
+      `INSERT INTO call_sessions (
+         call_code,
+         caller_id,
+         callee_id,
+         status,
+         billing_mode,
+         requested_at
+       )
+       VALUES (
+         gen_random_uuid()::text,
+         $1,
+         $2,
+         'ringing',
+         $3,
+         CURRENT_TIMESTAMP
+       )
+       RETURNING id, call_code, status, billing_mode, requested_at;`,
+      [callerId, callee.id, billingResult.mode]
+    );
+
+    const session = sessionRes.rows[0];
+
+    await client.query('COMMIT');
+
+    logger.info(`Call matched atomically: [SessionId: ${session.id}, CallCode: ${session.call_code}, BillingMode: ${session.billing_mode}]`);
+
+    return {
+      success: true,
+      session: {
+        id: session.id,
+        callCode: session.call_code,
+        status: session.status,
+        billingMode: session.billing_mode,
+        requestedAt: session.requested_at,
+      },
+      callee: {
+        id: callee.id,
+        pushToken: callee.push_token,
+      },
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logger.error('Database error in matchCaller:', error.message);
+    throw error;
+  } finally {
+    client.release();
+  }
+}

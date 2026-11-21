@@ -7,13 +7,16 @@ export const SOCKET_EVENTS = {
   PRESENCE_HELLO: 'presence:hello',
 
   // Call Negotiation & Signaling
+  CALL_FIND: 'call:find',
   CALL_REQUEST: 'call:request',
   CALL_RINGING: 'call:ringing',
   CALL_INCOMING: 'call:incoming',
   CALL_ACCEPT: 'call:accept',
   CALL_DECLINE: 'call:decline',
   CALL_NONE_AVAILABLE: 'call:none-available',
+  NO_USERS_AVAILABLE: 'no_users_available',
   CALL_MATCHED: 'call:matched',
+  CALL_ERROR: 'call:error',
 
   // WebRTC Signaling Relays
   SIGNAL_OFFER: 'signal:offer',
