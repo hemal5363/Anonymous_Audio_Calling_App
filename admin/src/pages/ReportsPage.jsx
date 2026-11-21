@@ -29,7 +29,7 @@ export function ReportsPage() {
       setReports(data.reports || []);
       setPagination(data.pagination || { page: 1, limit: 15, total: 0, totalPages: 1 });
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load abuse reports.');
+      setErrorMsg(err.message || 'Failed to load abuse reports from backend.');
     } finally {
       setLoading(false);
     }
@@ -86,6 +86,14 @@ export function ReportsPage() {
             <span className="alert-title">Error</span>
             <span className="alert-text">{errorMsg}</span>
           </div>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={() => fetchReports(pagination.page)}
+            style={{ marginRight: '8px' }}
+          >
+            Retry
+          </button>
           <button className="alert-close" onClick={() => setErrorMsg('')}>✕</button>
         </div>
       )}
@@ -128,15 +136,36 @@ export function ReportsPage() {
             {loading ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <div className="auth-spinner" style={{ margin: '20px auto' }}></div>
-                  <p>Loading reports...</p>
+                  <div className="table-loading-container">
+                    <div className="auth-spinner"></div>
+                    <p>Loading reports queue...</p>
+                  </div>
                 </td>
               </tr>
             ) : reports.length === 0 ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <span className="empty-icon">🛡️</span>
-                  <p>No abuse reports found in this queue.</p>
+                  <div className="empty-state-box">
+                    <span className="empty-icon">🛡️</span>
+                    <h4>No Reports in Queue</h4>
+                    {statusFilter === 'pending' ? (
+                      <p>Great job! There are no pending reports requiring administrative review.</p>
+                    ) : statusFilter ? (
+                      <>
+                        <p>No reports found with status "{statusFilter}".</p>
+                        <button
+                          type="button"
+                          className="btn-secondary btn-sm"
+                          onClick={() => setStatusFilter('')}
+                          style={{ marginTop: '8px' }}
+                        >
+                          Show All Reports
+                        </button>
+                      </>
+                    ) : (
+                      <p>No abuse reports have been submitted on this platform.</p>
+                    )}
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -224,29 +253,31 @@ export function ReportsPage() {
       </div>
 
       {/* Pagination Controls */}
-      <div className="pagination-bar">
-        <span className="pagination-info">
-          Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} reports)
-        </span>
-        <div className="pagination-buttons">
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page <= 1 || loading}
-            onClick={() => fetchReports(pagination.page - 1)}
-          >
-            ← Previous
-          </button>
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page >= pagination.totalPages || loading}
-            onClick={() => fetchReports(pagination.page + 1)}
-          >
-            Next →
-          </button>
+      {!loading && reports.length > 0 && (
+        <div className="pagination-bar">
+          <span className="pagination-info">
+            Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} reports)
+          </span>
+          <div className="pagination-buttons">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page <= 1 || loading}
+              onClick={() => fetchReports(pagination.page - 1)}
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page >= pagination.totalPages || loading}
+              onClick={() => fetchReports(pagination.page + 1)}
+            >
+              Next →
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Ban User Confirmation Modal */}
       {banModalReport && (

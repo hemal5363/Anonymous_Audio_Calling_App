@@ -40,12 +40,30 @@ export function DashboardPage() {
     return `${s}s`;
   };
 
+  // 1. Initial Full-Page Loading State
   if (loading && !stats) {
     return (
       <div className="page-container">
-        <div className="auth-loading-screen" style={{ height: '350px' }}>
+        <div className="state-card state-loading">
           <div className="auth-spinner"></div>
-          <p>Loading real-time platform metrics...</p>
+          <h3>Loading Platform Metrics</h3>
+          <p>Connecting to backend and aggregating real-time vitals...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Full-Page Error State (if initial fetch failed)
+  if (errorMsg && !stats) {
+    return (
+      <div className="page-container">
+        <div className="state-card state-error">
+          <span className="state-icon">⚠️</span>
+          <h3>Unable to Load Dashboard Data</h3>
+          <p>{errorMsg}</p>
+          <button type="button" className="btn-primary" onClick={fetchStats}>
+            🔄 Retry Loading
+          </button>
         </div>
       </div>
     );
@@ -69,18 +87,22 @@ export function DashboardPage() {
           className="btn-secondary btn-sm"
           onClick={handleRefresh}
           disabled={refreshing}
-          title="Refresh metrics"
+          title="Refresh metrics from database"
         >
           {refreshing ? 'Refreshing...' : '🔄 Refresh Metrics'}
         </button>
       </div>
 
+      {/* Error Alert Banner (if background refresh fails) */}
       {errorMsg && (
         <div className="alert-banner alert-danger" role="alert">
           <div className="alert-content">
-            <span className="alert-title">Error</span>
+            <span className="alert-title">Sync Error</span>
             <span className="alert-text">{errorMsg}</span>
           </div>
+          <button type="button" className="btn-secondary btn-sm" onClick={fetchStats} style={{ marginRight: '8px' }}>
+            Retry
+          </button>
           <button className="alert-close" onClick={() => setErrorMsg('')}>✕</button>
         </div>
       )}
@@ -91,12 +113,23 @@ export function DashboardPage() {
           <div className="alert-content">
             <span className="alert-title">⚠️ Moderation Attention Needed</span>
             <span className="alert-text">
-              There are <strong>{safety.pending_reports_count}</strong> pending abuse report(s) requiring review.
+              There are <strong>{safety.pending_reports_count}</strong> pending abuse report(s) awaiting review.
             </span>
           </div>
           <Link to="/reports" className="btn-primary btn-sm">
             Review Reports →
           </Link>
+        </div>
+      )}
+
+      {/* Empty State Banner (if completely clean platform with 0 registered users) */}
+      {overview.total_registered_users === 0 && (
+        <div className="state-card state-empty-inline">
+          <span className="state-icon">🚀</span>
+          <div className="state-empty-content">
+            <h4>Welcome to AnonAudio Admin Console</h4>
+            <p>No user accounts have been created yet. As mobile clients sign up and connect, traffic statistics and call metrics will automatically populate here.</p>
+          </div>
         </div>
       )}
 
@@ -122,7 +155,7 @@ export function DashboardPage() {
             {overview.currently_available_users ?? 0}
           </div>
           <span className="kpi-subtext">
-            Online & available for calls ({overview.currently_online_sockets ?? 0} online sockets)
+            Online & available for calls ({overview.currently_online_sockets ?? 0} sockets)
           </span>
         </div>
 

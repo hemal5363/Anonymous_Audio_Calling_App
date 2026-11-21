@@ -261,9 +261,25 @@ export function SettingsPage() {
   if (loading) {
     return (
       <div className="page-container">
-        <div className="auth-loading-screen" style={{ height: '350px' }}>
+        <div className="state-card state-loading">
           <div className="auth-spinner"></div>
-          <p>Loading platform configuration...</p>
+          <h3>Loading Platform Configuration</h3>
+          <p>Retrieving active monetization rules and system settings from database...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (errorMsg && !savedSettings) {
+    return (
+      <div className="page-container">
+        <div className="state-card state-error">
+          <span className="state-icon">⚠️</span>
+          <h3>Unable to Load Settings</h3>
+          <p>{errorMsg}</p>
+          <button type="button" className="btn-primary" onClick={fetchSettings}>
+            🔄 Retry Loading Settings
+          </button>
         </div>
       </div>
     );

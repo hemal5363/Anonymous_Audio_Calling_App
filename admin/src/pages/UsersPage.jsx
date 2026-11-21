@@ -31,7 +31,7 @@ export function UsersPage() {
       setUsers(data.users || []);
       setPagination(data.pagination || { page: 1, limit: 15, total: 0, totalPages: 1 });
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load user directory.');
+      setErrorMsg(err.message || 'Failed to load user directory from backend.');
     } finally {
       setLoading(false);
     }
@@ -44,6 +44,12 @@ export function UsersPage() {
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     fetchUsers(1, search, statusFilter);
+  };
+
+  const handleClearFilters = () => {
+    setSearch('');
+    setStatusFilter('');
+    fetchUsers(1, '', '');
   };
 
   const handleStatusChange = async (userId, newStatus, reason = '') => {
@@ -59,7 +65,6 @@ export function UsersPage() {
 
       setSuccessMsg(`User status updated to "${newStatus}" successfully.`);
       setBanModalUser(null);
-      // Refresh list
       fetchUsers(pagination.page);
     } catch (err) {
       setErrorMsg(err.message || `Failed to update status to ${newStatus}.`);
@@ -67,6 +72,8 @@ export function UsersPage() {
       setActionLoadingId(null);
     }
   };
+
+  const hasActiveFilters = Boolean(search.trim() || statusFilter);
 
   return (
     <div className="page-container">
@@ -93,6 +100,14 @@ export function UsersPage() {
             <span className="alert-title">Error</span>
             <span className="alert-text">{errorMsg}</span>
           </div>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={() => fetchUsers(pagination.page)}
+            style={{ marginRight: '8px' }}
+          >
+            Retry
+          </button>
           <button className="alert-close" onClick={() => setErrorMsg('')}>✕</button>
         </div>
       )}
@@ -117,6 +132,7 @@ export function UsersPage() {
                   setSearch('');
                   fetchUsers(1, '', statusFilter);
                 }}
+                title="Clear search"
               >
                 ✕
               </button>
@@ -140,6 +156,16 @@ export function UsersPage() {
             <option value="suspended">Suspended</option>
             <option value="banned">Banned</option>
           </select>
+          {hasActiveFilters && (
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={handleClearFilters}
+              title="Reset all filters"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
       </div>
 
@@ -162,15 +188,34 @@ export function UsersPage() {
             {loading ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <div className="auth-spinner" style={{ margin: '20px auto' }}></div>
-                  <p>Loading users...</p>
+                  <div className="table-loading-container">
+                    <div className="auth-spinner"></div>
+                    <p>Loading user directory...</p>
+                  </div>
                 </td>
               </tr>
             ) : users.length === 0 ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <span className="empty-icon">👥</span>
-                  <p>No user accounts matched the search criteria.</p>
+                  <div className="empty-state-box">
+                    <span className="empty-icon">👥</span>
+                    <h4>No User Accounts Found</h4>
+                    {hasActiveFilters ? (
+                      <>
+                        <p>No users matched your search query or status filter.</p>
+                        <button
+                          type="button"
+                          className="btn-secondary btn-sm"
+                          onClick={handleClearFilters}
+                          style={{ marginTop: '8px' }}
+                        >
+                          Clear Search & Filters
+                        </button>
+                      </>
+                    ) : (
+                      <p>No user accounts have registered yet. New signups from the mobile app will be listed here.</p>
+                    )}
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -240,7 +285,7 @@ export function UsersPage() {
                           </button>
                         ) : (
                           <>
-                            {isSuspended ? (
+                            {isSuspended && (
                               <button
                                 type="button"
                                 className="btn-action-unban"
@@ -249,7 +294,7 @@ export function UsersPage() {
                               >
                                 {isBusy ? 'Updating...' : 'Reactivate'}
                               </button>
-                            ) : null}
+                            )}
                             <button
                               type="button"
                               className="btn-action-ban"
@@ -274,29 +319,31 @@ export function UsersPage() {
       </div>
 
       {/* Pagination Controls */}
-      <div className="pagination-bar">
-        <span className="pagination-info">
-          Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} total accounts)
-        </span>
-        <div className="pagination-buttons">
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page <= 1 || loading}
-            onClick={() => fetchUsers(pagination.page - 1)}
-          >
-            ← Previous
-          </button>
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page >= pagination.totalPages || loading}
-            onClick={() => fetchUsers(pagination.page + 1)}
-          >
-            Next →
-          </button>
+      {!loading && users.length > 0 && (
+        <div className="pagination-bar">
+          <span className="pagination-info">
+            Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} total accounts)
+          </span>
+          <div className="pagination-buttons">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page <= 1 || loading}
+              onClick={() => fetchUsers(pagination.page - 1)}
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page >= pagination.totalPages || loading}
+              onClick={() => fetchUsers(pagination.page + 1)}
+            >
+              Next →
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Ban Confirmation Modal */}
       {banModalUser && (

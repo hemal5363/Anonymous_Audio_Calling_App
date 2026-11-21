@@ -23,7 +23,7 @@ export function CallLogsPage() {
       setCalls(data.calls || []);
       setPagination(data.pagination || { page: 1, limit: 15, total: 0, totalPages: 1 });
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load call session logs.');
+      setErrorMsg(err.message || 'Failed to load call session logs from backend.');
     } finally {
       setLoading(false);
     }
@@ -69,6 +69,14 @@ export function CallLogsPage() {
             <span className="alert-title">Error</span>
             <span className="alert-text">{errorMsg}</span>
           </div>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={() => fetchCalls(pagination.page)}
+            style={{ marginRight: '8px' }}
+          >
+            Retry
+          </button>
           <button className="alert-close" onClick={() => setErrorMsg('')}>✕</button>
         </div>
       )}
@@ -90,6 +98,15 @@ export function CallLogsPage() {
             <option value="missed">Missed (Ring Timeout)</option>
             <option value="failed">Failed</option>
           </select>
+          {statusFilter && (
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => setStatusFilter('')}
+            >
+              Reset Filter
+            </button>
+          )}
         </div>
       </div>
 
@@ -112,15 +129,34 @@ export function CallLogsPage() {
             {loading ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <div className="auth-spinner" style={{ margin: '20px auto' }}></div>
-                  <p>Loading call logs...</p>
+                  <div className="table-loading-container">
+                    <div className="auth-spinner"></div>
+                    <p>Loading call session logs...</p>
+                  </div>
                 </td>
               </tr>
             ) : calls.length === 0 ? (
               <tr>
                 <td colSpan="8" className="table-empty-cell">
-                  <span className="empty-icon">📞</span>
-                  <p>No call sessions match the selected filter.</p>
+                  <div className="empty-state-box">
+                    <span className="empty-icon">📞</span>
+                    <h4>No Call Sessions Found</h4>
+                    {statusFilter ? (
+                      <>
+                        <p>No calls match status "{statusFilter}".</p>
+                        <button
+                          type="button"
+                          className="btn-secondary btn-sm"
+                          onClick={() => setStatusFilter('')}
+                          style={{ marginTop: '8px' }}
+                        >
+                          Show All Calls
+                        </button>
+                      </>
+                    ) : (
+                      <p>No call sessions have occurred yet. In-progress and completed calls will appear here automatically.</p>
+                    )}
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -174,29 +210,31 @@ export function CallLogsPage() {
       </div>
 
       {/* Pagination Controls */}
-      <div className="pagination-bar">
-        <span className="pagination-info">
-          Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} total sessions)
-        </span>
-        <div className="pagination-buttons">
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page <= 1 || loading}
-            onClick={() => fetchCalls(pagination.page - 1)}
-          >
-            ← Previous
-          </button>
-          <button
-            type="button"
-            className="btn-secondary btn-sm"
-            disabled={pagination.page >= pagination.totalPages || loading}
-            onClick={() => fetchCalls(pagination.page + 1)}
-          >
-            Next →
-          </button>
+      {!loading && calls.length > 0 && (
+        <div className="pagination-bar">
+          <span className="pagination-info">
+            Showing Page <strong>{pagination.page}</strong> of <strong>{pagination.totalPages || 1}</strong> ({pagination.total} total sessions)
+          </span>
+          <div className="pagination-buttons">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page <= 1 || loading}
+              onClick={() => fetchCalls(pagination.page - 1)}
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={pagination.page >= pagination.totalPages || loading}
+              onClick={() => fetchCalls(pagination.page + 1)}
+            >
+              Next →
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
