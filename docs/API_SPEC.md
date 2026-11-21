@@ -774,6 +774,48 @@ Provides aggregated real-time and historical platform metrics.
 
 ---
 
+### 6.6 Platform Call Logs (Anonymous)
+Returns a paginated list of all call sessions. Strictly exposes anonymous session identifiers, timestamps, durations, and end reasons. Never exposes caller/callee names, emails, phone numbers, or audio files.
+
+- **Method:** `GET`
+- **Path:** `/admin/calls?page=1&limit=20&status=ended`
+- **Auth Required:** Bearer JWT Admin
+- **Query Parameters:**
+  - `page` (optional, default 1): Page index.
+  - `limit` (optional, default 20): Items per page (max 100).
+  - `status` (optional): Filter by session status (`requested`, `ringing`, `connected`, `ended`, `declined`, `missed`, `failed`).
+- **Response Body (`200 OK`):**
+```json
+{
+  "calls": [
+    {
+      "session_id": "c1d2e3f4-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
+      "call_code": "4e72a819-2f22-4d51-9e73-9a4f66551122",
+      "status": "ended",
+      "duration_seconds": 240,
+      "end_reason": "caller_hangup",
+      "billing_mode": "free",
+      "amount_charged": "0.00",
+      "minutes_charged": 0,
+      "created_at": "2026-11-21T18:30:00.000Z",
+      "connected_at": "2026-11-21T18:30:05.000Z",
+      "ended_at": "2026-11-21T18:34:05.000Z"
+    }
+  ],
+  "pagination": {
+    "total": 1,
+    "page": 1,
+    "limit": 20,
+    "totalPages": 1
+  }
+}
+```
+- **Error Codes:**
+  - `401 Unauthorized`: Missing or invalid admin token.
+  - `403 Forbidden`: User token rejected.
+
+---
+
 ## 7. Socket.IO Real-Time Events (WSS)
 
 Socket.IO connection URL: `wss://api.yourdomain.com/socket.io/?token=<access_token>`  

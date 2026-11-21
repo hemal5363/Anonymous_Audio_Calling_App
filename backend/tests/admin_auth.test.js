@@ -106,6 +106,7 @@ describe('Admin Authorization & Endpoints', () => {
       { method: 'get', path: '/admin/stats' },
       { method: 'get', path: '/admin/users' },
       { method: 'get', path: '/admin/reports' },
+      { method: 'get', path: '/admin/calls' },
     ];
 
     test.each(adminEndpoints)(
@@ -243,7 +244,8 @@ describe('Admin Authorization & Endpoints', () => {
         .mockResolvedValueOnce({ rows: [{ seconds: 3600 }] }) // today seconds
         .mockResolvedValueOnce({ rows: [{ revenue: '150.00' }] }) // today revenue
         .mockResolvedValueOnce({ rows: [{ count: 1 }] }) // pending reports
-        .mockResolvedValueOnce({ rows: [{ count: 3 }] }); // banned users
+        .mockResolvedValueOnce({ rows: [{ count: 3 }] }) // banned users
+        .mockResolvedValueOnce({ rows: [{ value_json: { mode: 'per_minute' } }] }); // monetization mode
 
       const res = await request(app)
         .get('/admin/stats')
@@ -253,7 +255,47 @@ describe('Admin Authorization & Endpoints', () => {
       expect(res.body.overview).toBeDefined();
       expect(res.body.overview.total_registered_users).toBe(120);
       expect(res.body.today_metrics.total_call_minutes).toBe(60);
+      expect(res.body.today_metrics.average_call_duration_seconds).toBe(95); // 3600 / 38 = 95s
+      expect(res.body.today_metrics.monetization_mode).toBe('per_minute');
       expect(res.body.safety_metrics.pending_reports_count).toBe(1);
+    });
+
+    it('GET /admin/calls should return paginated list of calls with anonymous session id and no caller identity', async () => {
+      const mockCalls = [
+        {
+          session_id: 'call-session-uuid-1',
+          call_code: 'code-1234',
+          status: 'ended',
+          duration_seconds: 145,
+          end_reason: 'caller_hangup',
+          billing_mode: 'free',
+          amount_charged: '0.00',
+          minutes_charged: 0,
+          created_at: new Date().toISOString(),
+        },
+      ];
+
+      querySpy
+        .mockResolvedValueOnce({ rows: [mockAdmin] }) // auth check
+        .mockResolvedValueOnce({ rows: mockCalls }) // call records
+        .mockResolvedValueOnce({ rows: [{ total: 1 }] }); // count
+
+      const res = await request(app)
+        .get('/admin/calls')
+        .set('Authorization', `Bearer ${validAdminToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.calls).toBeDefined();
+      expect(res.body.calls).toHaveLength(1);
+      expect(res.body.calls[0].session_id).toBe('call-session-uuid-1');
+      expect(res.body.calls[0].duration_seconds).toBe(145);
+      expect(res.body.calls[0].end_reason).toBe('caller_hangup');
+      // Crucial privacy check: no caller or callee personal details exposed
+      expect(res.body.calls[0].caller_id).toBeUndefined();
+      expect(res.body.calls[0].callee_id).toBeUndefined();
+      expect(res.body.calls[0].email).toBeUndefined();
+      expect(res.body.calls[0].phone).toBeUndefined();
+      expect(res.body.pagination.total).toBe(1);
     });
   });
 });

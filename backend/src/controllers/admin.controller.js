@@ -449,6 +449,7 @@ export async function getStats(req, res, next) {
       todayRevenueRes,
       pendingReportsRes,
       bannedUsersRes,
+      monetizationRes,
     ] = await Promise.all([
       pool.query('SELECT COUNT(*) as count FROM users;'),
       pool.query("SELECT COUNT(*) as count FROM users WHERE is_available = TRUE AND status = 'active';"),
@@ -459,27 +460,106 @@ export async function getStats(req, res, next) {
       pool.query("SELECT COALESCE(SUM(amount_charged), 0.00)::text as revenue FROM call_sessions WHERE created_at >= CURRENT_DATE;"),
       pool.query("SELECT COUNT(*) as count FROM reports WHERE status = 'pending';"),
       pool.query("SELECT COUNT(*) as count FROM users WHERE status = 'banned';"),
+      pool.query("SELECT value_json FROM app_settings WHERE key = 'monetization';"),
     ]);
 
-    const totalMinutes = Math.floor(parseInt(todayMinutesRes.rows[0].seconds, 10) / 60);
+    const totalSeconds = parseInt(todayMinutesRes.rows[0]?.seconds || 0, 10);
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    const connectedCalls = parseInt(todayConnectedRes.rows[0]?.count || 0, 10);
+    const avgDurationSeconds = connectedCalls > 0 ? Math.round(totalSeconds / connectedCalls) : 0;
+    const monetizationMode = monetizationRes.rows[0]?.value_json?.mode || 'free';
 
     return res.status(200).json({
       overview: {
         total_registered_users: parseInt(totalUsersRes.rows[0].count, 10),
-        active_users_today: parseInt(todayConnectedRes.rows[0].count, 10), // Users engaged in calls today
+        active_users_today: connectedCalls, // Users engaged in calls today
         currently_online_sockets: userSocketMap.getOnlineCount(),
         currently_available_users: parseInt(availableUsersRes.rows[0].count, 10),
         active_calls_now: parseInt(activeCallsRes.rows[0].count, 10),
+        monetization_mode: monetizationMode,
       },
       today_metrics: {
         total_calls_initiated: parseInt(todayCallsRes.rows[0].count, 10),
-        total_connected_calls: parseInt(todayConnectedRes.rows[0].count, 10),
+        total_connected_calls: connectedCalls,
         total_call_minutes: totalMinutes,
+        total_call_seconds: totalSeconds,
+        average_call_duration_seconds: avgDurationSeconds,
         total_revenue: todayRevenueRes.rows[0].revenue || '0.00',
+        monetization_mode: monetizationMode,
       },
       safety_metrics: {
         pending_reports_count: parseInt(pendingReportsRes.rows[0].count, 10),
         banned_users_count: parseInt(bannedUsersRes.rows[0].count, 10),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 6.6 List Platform Call Logs (Anonymous)
+ * GET /admin/calls
+ * Strictly returns anonymous session id, duration, end reason, and date.
+ * No user names, emails, phones, or audio recordings are exposed.
+ */
+export async function listCallLogs(req, res, next) {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+    const status = req.query.status || null;
+
+    let queryText = `
+      SELECT 
+        id as session_id,
+        call_code,
+        status,
+        duration_seconds,
+        end_reason,
+        billing_mode,
+        amount_charged::text as amount_charged,
+        minutes_charged,
+        created_at,
+        connected_at,
+        ended_at
+      FROM call_sessions
+      WHERE 1=1
+    `;
+
+    const params = [];
+
+    if (status) {
+      params.push(status);
+      queryText += ` AND status = $${params.length}`;
+    }
+
+    const countParams = [...params];
+    const countText = `
+      SELECT COUNT(*) as total
+      FROM call_sessions
+      WHERE 1=1
+      ${status ? ` AND status = $1` : ''}
+    `;
+
+    params.push(limit);
+    params.push(offset);
+    queryText += ` ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length};`;
+
+    const [{ rows: calls }, { rows: countRows }] = await Promise.all([
+      pool.query(queryText, params),
+      pool.query(countText, countParams),
+    ]);
+
+    const total = parseInt(countRows[0]?.total || 0, 10);
+
+    return res.status(200).json({
+      calls,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
       },
     });
   } catch (error) {

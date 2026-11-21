@@ -8,6 +8,7 @@ import {
   listReports,
   resolveReport,
   getStats,
+  listCallLogs,
 } from '../controllers/admin.controller.js';
 import { authenticateAdmin } from '../middleware/adminAuth.middleware.js';
 import { loginRateLimiter } from '../middleware/rateLimiter.js';
@@ -34,5 +35,9 @@ router.patch('/reports/:id', resolveReport);
 
 // 6.5 Platform Statistics & Dashboard
 router.get('/stats', getStats);
+
+// 6.6 Platform Call Logs (Anonymous)
+router.get('/calls', listCallLogs);
+router.get('/call-logs', listCallLogs);
 
 export default router;

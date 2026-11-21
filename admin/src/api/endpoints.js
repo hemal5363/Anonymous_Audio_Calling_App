@@ -22,6 +22,6 @@ export const API_ENDPOINTS = {
   // Dashboard Stats
   STATS: '/admin/stats',
 
-  // Call Logs & History
-  CALL_LOGS: '/calls/history',
+  // Call Logs & History (Admin anonymous logs)
+  CALL_LOGS: '/admin/calls',
 };
