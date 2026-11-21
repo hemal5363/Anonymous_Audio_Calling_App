@@ -52,6 +52,31 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
+.auth-loading-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.auth-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border-light);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: auth-spin 0.8s linear infinite;
+}
+
+@keyframes auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ==========================================================================
    Admin Layout Structure
    ========================================================================== */

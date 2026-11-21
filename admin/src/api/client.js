@@ -1,74 +1,82 @@
 /**
  * Admin API Client Helper
  * 
- * Automatically attaches the stored admin token to every outgoing request.
- * If any request returns a 401 Unauthorized, it purges the local session and
- * immediately redirects the administrator to the login page.
+ * Manages HTTP communication with the backend API.
+ * Keeps the admin access token strictly IN-MEMORY.
+ * Does NOT persist tokens in localStorage, sessionStorage, or URL query parameters.
+ * Automatically attaches Authorization header if present.
+ * If any request returns a 401 Unauthorized, it resets the in-memory token
+ * and notifies active listeners to update application state.
  */
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 class ApiClient {
   constructor(baseUrl = BASE_URL) {
-    this.baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this._inMemoryToken = null;
+    this._unauthorizedListeners = new Set();
   }
 
   /**
-   * Retrieve active admin JWT token from localStorage
+   * Get active admin JWT access token from memory
    */
   getToken() {
-    try {
-      return localStorage.getItem('admin_token') || null;
-    } catch {
-      return null;
-    }
+    return this._inMemoryToken;
   }
 
   /**
-   * Set admin JWT token in localStorage
+   * Set admin JWT access token in memory only
    */
   setToken(token) {
-    try {
-      if (token) {
-        localStorage.setItem('admin_token', token);
-      } else {
-        localStorage.removeItem('admin_token');
-      }
-    } catch {
-      // Ignore storage write errors (e.g. private browsing mode)
-    }
+    this._inMemoryToken = token || null;
   }
 
   /**
-   * Clear admin session and redirect to login page
+   * Clear in-memory token
+   */
+  clearToken() {
+    this._inMemoryToken = null;
+  }
+
+  /**
+   * Subscribe to 401 Unauthorized events
+   */
+  onUnauthorized(callback) {
+    this._unauthorizedListeners.add(callback);
+    return () => {
+      this._unauthorizedListeners.delete(callback);
+    };
+  }
+
+  /**
+   * Notify subscribers on 401 Unauthorized
    */
   handleUnauthorized() {
-    try {
-      localStorage.removeItem('admin_token');
-      localStorage.removeItem('admin_user');
-    } catch {
-      // Ignore
-    }
-
-    // Only redirect if not already on the login page
-    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-      const redirectUrl = `/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
-      window.location.href = redirectUrl;
+    this.clearToken();
+    for (const listener of this._unauthorizedListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error('Error in onUnauthorized listener:', err);
+      }
     }
   }
 
   /**
-   * Core request dispatcher with automatic auth headers and 401 interceptor
+   * Core request dispatcher with automatic auth header and 401 handling
    */
   async request(endpoint, options = {}) {
-    const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+    const url = endpoint.startsWith('http')
+      ? endpoint
+      : `${this.baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
 
     const headers = {
       'Content-Type': 'application/json',
       ...options.headers,
     };
 
-    // Attach admin token if available
+    // Attach in-memory admin token if present
     const token = this.getToken();
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
@@ -94,6 +102,7 @@ class ApiClient {
         const err = new Error(errorData.message || 'Unauthorized: session expired or invalid credentials');
         err.statusCode = 401;
         err.error = 'Unauthorized';
+        err.details = errorData;
         throw err;
       }
 
@@ -115,10 +124,6 @@ class ApiClient {
 
       return data;
     } catch (error) {
-      // Network failure or rethrown HTTP error
-      if (error.statusCode === 401) {
-        throw error;
-      }
       throw error;
     }
   }

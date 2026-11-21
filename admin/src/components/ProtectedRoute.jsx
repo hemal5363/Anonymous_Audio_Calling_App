@@ -8,16 +8,16 @@ export function ProtectedRoute({ children }) {
 
   if (loading) {
     return (
-      <div className="loading-screen">
-        <div className="spinner"></div>
+      <div className="auth-loading-screen">
+        <div className="auth-spinner"></div>
         <p>Verifying admin authorization...</p>
       </div>
     );
   }
 
   if (!isAuthenticated) {
-    // Redirect to /login while saving current location for post-login redirect
-    return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname + location.search)}`} replace />;
+    // Redirect to /login with attempted destination in location.state (NOT in URL)
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
   return children;
