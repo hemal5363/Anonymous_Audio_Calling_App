@@ -9,6 +9,7 @@ export type RootStackParamList = {
   Searching: undefined;
   IncomingCall: undefined;
   InCall: undefined;
+  Wallet: undefined;
 };
 
 export type LoginScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Login'>;
@@ -19,3 +20,4 @@ export type HomeScreenNavigationProp = NativeStackNavigationProp<RootStackParamL
 export type SearchingScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Searching'>;
 export type IncomingCallScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'IncomingCall'>;
 export type InCallScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'InCall'>;
+export type WalletScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Wallet'>;

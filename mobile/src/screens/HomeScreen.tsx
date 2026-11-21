@@ -114,25 +114,35 @@ export default function HomeScreen() {
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         {/* Top App Bar */}
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerBrand}>
             <Text style={styles.brandTitle}>Anonymous Audio</Text>
             <Text style={styles.brandSubtitle}>
               Logged in as: {user?.email || user?.phone || 'Anonymous'}
             </Text>
           </View>
 
-          <TouchableOpacity
-            style={styles.logoutButton}
-            onPress={handleLogoutPress}
-            disabled={loggingOut}
-            activeOpacity={0.7}
-          >
-            {loggingOut ? (
-              <ActivityIndicator size="small" color="#f87171" />
-            ) : (
-              <Text style={styles.logoutButtonText}>Log Out</Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            <TouchableOpacity
+              style={styles.walletHeaderButton}
+              onPress={() => navigation.navigate('Wallet')}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.walletHeaderButtonText}>💳 Wallet</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.logoutButton}
+              onPress={handleLogoutPress}
+              disabled={loggingOut}
+              activeOpacity={0.7}
+            >
+              {loggingOut ? (
+                <ActivityIndicator size="small" color="#f87171" />
+              ) : (
+                <Text style={styles.logoutButtonText}>Log Out</Text>
+              )}
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Server Connection Pill */}
@@ -241,6 +251,21 @@ export default function HomeScreen() {
           </Text>
         </View>
 
+        {/* Quick Access Card to Wallet & Call History */}
+        <TouchableOpacity
+          style={styles.walletCardButton}
+          onPress={() => navigation.navigate('Wallet')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.walletCardLeft}>
+            <Text style={styles.walletCardTitle}>💳 Wallet & Call History</Text>
+            <Text style={styles.walletCardSubtitle}>
+              View active plan/balance & anonymous call history
+            </Text>
+          </View>
+          <Text style={styles.walletCardArrow}>→</Text>
+        </TouchableOpacity>
+
         {/* Strict Privacy Guarantee Box (Universal Design Rule: Zero Peer Identity) */}
         <View style={styles.privacyBox}>
           <Text style={styles.privacyHeader}>🔒 Strict Anonymity Guarantee</Text>
@@ -285,6 +310,58 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
+  },
+  headerBrand: {
+    flex: 1,
+    marginRight: 8,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  walletHeaderButton: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  walletHeaderButtonText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  walletCardButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 20,
+  },
+  walletCardLeft: {
+    flex: 1,
+    marginRight: 10,
+  },
+  walletCardTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f8fafc',
+    marginBottom: 4,
+  },
+  walletCardSubtitle: {
+    fontSize: 12,
+    color: '#94a3b8',
+  },
+  walletCardArrow: {
+    fontSize: 18,
+    color: '#38bdf8',
+    fontWeight: '700',
   },
   logoutButton: {
     backgroundColor: '#1e293b',

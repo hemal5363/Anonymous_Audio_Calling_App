@@ -10,6 +10,7 @@ import HomeScreen from '../screens/HomeScreen';
 import SearchingScreen from '../screens/SearchingScreen';
 import IncomingCallScreen from '../screens/IncomingCallScreen';
 import InCallScreen from '../screens/InCallScreen';
+import WalletScreen from '../screens/WalletScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -55,6 +56,11 @@ export default function RootNavigator() {
           <Stack.Screen
             name="InCall"
             component={InCallScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="Wallet"
+            component={WalletScreen}
             options={{ headerShown: false }}
           />
         </>

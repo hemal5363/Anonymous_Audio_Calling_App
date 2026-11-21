@@ -7,6 +7,7 @@ import routes from './routes/index.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import callsRoutes from './routes/calls.routes.js';
+import billingRoutes from './routes/billing.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 import { config } from './config/index.js';
 import { getHealth } from './controllers/health.controller.js';
@@ -52,6 +53,7 @@ app.get('/config/public', getAuthConfig);
 app.use('/auth', authRoutes);
 app.use('/user', userRoutes);
 app.use('/calls', callsRoutes);
+app.use('/billing', billingRoutes);
 app.use('/admin', adminRoutes);
 
 // Versioned /v1 prefix endpoints
