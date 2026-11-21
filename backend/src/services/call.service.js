@@ -2,6 +2,7 @@ import { pool } from '../db/index.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import { stopCallBillingTimer } from './billing.service.js';
 
 /**
  * Service handling WebRTC call signaling state transitions,
@@ -106,6 +107,7 @@ export async function declineCall({ callCode, calleeId, reason = 'declined' }) {
     return { success: false, error: 'unauthorized', message: 'Only the callee can decline this call' };
   }
 
+  stopCallBillingTimer(callCode);
   callSessionManager.endSession(callCode);
 
   try {
@@ -133,6 +135,7 @@ export async function declineCall({ callCode, calleeId, reason = 'declined' }) {
  * Ringing timeout reached (30s elapsed without callee answer)
  */
 export async function handleRingingTimeout({ callCode }) {
+  stopCallBillingTimer(callCode);
   const session = callSessionManager.endSession(callCode);
 
   if (!session) {
@@ -164,6 +167,7 @@ export async function handleRingingTimeout({ callCode }) {
  * Ends call (caller hangup, callee hangup, skip, or network disconnect)
  */
 export async function endCall({ callCode, userId, reason = null }) {
+  stopCallBillingTimer(callCode);
   let session = callSessionManager.endSession(callCode);
   let sessionId, callerId, calleeId, connectedAt;
 

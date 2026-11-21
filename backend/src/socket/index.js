@@ -14,6 +14,11 @@ import {
 } from '../services/call.service.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import {
+  startCallBillingTimer,
+  stopCallBillingTimer,
+  isCallBillingTimerActive,
+} from '../services/billing.service.js';
 
 let ioInstance = null;
 
@@ -307,6 +312,16 @@ export function initSocketServer(httpServer) {
       if (callCode && callSessionManager.isParticipant(callCode, userId)) {
         callSessionManager.markConnected(callCode);
         logger.info(`WebRTC connected event received for session: ${callCode}`);
+
+        const session = callSessionManager.getSession(callCode);
+        if (session && !isCallBillingTimerActive(callCode)) {
+          startCallBillingTimer({
+            io,
+            callCode,
+            callerId: session.callerId,
+            sessionId: session.sessionId,
+          });
+        }
       }
     });
 

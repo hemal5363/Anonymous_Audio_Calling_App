@@ -1,29 +1,62 @@
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { userSocketMap } from '../socket/userSocketMap.js';
+import { SOCKET_EVENTS } from '../socket/events.js';
+import { callSessionManager } from '../socket/callSessionManager.js';
 
 /**
- * Service to enforce pre-call billing authorization based on active app_settings.
+ * UUID validation helper to prevent PostgreSQL syntax errors with mock fixtures
+ */
+function isValidUUID(str) {
+  return (
+    typeof str === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)
+  );
+}
+
+/**
+ * In-memory map of active call billing timers: callCode -> timerEntry
+ */
+const activeBillingTimers = new Map();
+
+/**
+ * 1. Fetch current monetization mode and rates directly from app_settings in DB.
+ * Always queries the database so admin updates apply immediately.
+ */
+export async function getMonetizationSettings(clientOrPool = pool) {
+  const db = clientOrPool || pool;
+  const settingsRes = await db.query(
+    "SELECT value_json FROM app_settings WHERE key = 'monetization';"
+  );
+
+  return (
+    settingsRes.rows[0]?.value_json || {
+      mode: 'free',
+      per_minute_rate: 1.0,
+      currency: 'INR',
+      free_trial_minutes_new_user: 10,
+      free_daily_minute_cap: null,
+    }
+  );
+}
+
+/**
+ * 2. Pre-call billing authorization check based on active app_settings.
+ * Rules:
+ * - free: always allow (with optional daily minute cap check if configured)
+ * - subscription: allow only with an active subscription
+ * - per-minute: require minimum wallet balance (at least 1 minute) before call starts
  * The callee is never charged.
  */
 export async function checkCallerBillingStanding(clientOrPool, callerId) {
   const db = clientOrPool || pool;
 
-  // 1. Fetch current monetization mode and rates
-  const settingsRes = await db.query(
-    "SELECT value_json FROM app_settings WHERE key = 'monetization';"
-  );
-
-  const monetization = settingsRes.rows[0]?.value_json || {
-    mode: 'free',
-    per_minute_rate: 1.0,
-    currency: 'INR',
-    free_daily_minute_cap: null,
-  };
-
+  // Fetch current monetization mode and rates directly from DB
+  const monetization = await getMonetizationSettings(db);
   const mode = monetization.mode || 'free';
 
   // -------------------------------------------------------------------------
-  // Mode 1: Free Mode
+  // Mode 1: Free Mode - always allow
   // -------------------------------------------------------------------------
   if (mode === 'free') {
     const dailyCap = monetization.free_daily_minute_cap;
@@ -56,7 +89,7 @@ export async function checkCallerBillingStanding(clientOrPool, callerId) {
   }
 
   // -------------------------------------------------------------------------
-  // Mode 2: Subscription Mode
+  // Mode 2: Subscription Mode - allow only with an active subscription
   // -------------------------------------------------------------------------
   if (mode === 'subscription') {
     const subRes = await db.query(
@@ -98,7 +131,9 @@ export async function checkCallerBillingStanding(clientOrPool, callerId) {
       const usedMinutes = Math.floor(totalSeconds / 60);
 
       if (usedMinutes >= Number(sub.daily_minute_cap)) {
-        logger.info(`Caller ${callerId} rejected: subscription daily cap reached (${usedMinutes}/${sub.daily_minute_cap} mins)`);
+        logger.info(
+          `Caller ${callerId} rejected: subscription daily cap reached (${usedMinutes}/${sub.daily_minute_cap} mins)`
+        );
         return {
           allowed: false,
           error: 'daily_limit_reached',
@@ -112,11 +147,11 @@ export async function checkCallerBillingStanding(clientOrPool, callerId) {
   }
 
   // -------------------------------------------------------------------------
-  // Mode 3: Per-Minute Mode
+  // Mode 3: Per-Minute Mode - require minimum wallet balance before call starts
   // -------------------------------------------------------------------------
   if (mode === 'per_minute') {
     const walletRes = await db.query(
-      `SELECT balance_amount, balance_minutes, free_trial_minutes, is_locked
+      `SELECT id, balance_amount, balance_minutes, free_trial_minutes, is_locked
        FROM wallets
        WHERE user_id = $1;`,
       [callerId]
@@ -166,4 +201,332 @@ export async function checkCallerBillingStanding(clientOrPool, callerId) {
 
   // Fallback default
   return { allowed: true, mode: 'free' };
+}
+
+/**
+ * 3. In-call per-minute deduction.
+ * Deducts 1 minute from trial minutes, prepaid minutes, or debits per_minute_rate.
+ * Records the debit in wallet_transactions and updates call_sessions.
+ * Returns balanceExhausted = true when balance reaches zero.
+ */
+export async function deductCallMinute(clientOrPool, { callCode, callerId, sessionId }) {
+  const isPool = clientOrPool && typeof clientOrPool.connect === 'function';
+  const client = isPool ? await clientOrPool.connect() : clientOrPool || pool;
+  const shouldRelease = isPool;
+
+  try {
+    if (isPool) {
+      await client.query('BEGIN');
+    }
+
+    // 1. Fetch current monetization mode and rates directly from DB
+    const monetization = await getMonetizationSettings(client);
+    const mode = monetization.mode || 'free';
+
+    // If mode is not per_minute (e.g. admin changed mode mid-call), no deduction is required
+    if (mode !== 'per_minute') {
+      if (isPool) await client.query('COMMIT');
+      return {
+        success: true,
+        deducted: false,
+        mode,
+        balanceExhausted: false,
+        remainingMinutes: Infinity,
+      };
+    }
+
+    // 2. Lock wallet row for update
+    const walletRes = await client.query(
+      `SELECT id, balance_amount, balance_minutes, free_trial_minutes, is_locked
+       FROM wallets
+       WHERE user_id = $1
+       FOR UPDATE;`,
+      [callerId]
+    );
+
+    if (walletRes.rows.length === 0) {
+      if (isPool) await client.query('ROLLBACK');
+      return {
+        success: false,
+        deducted: false,
+        balanceExhausted: true,
+        error: 'wallet_not_found',
+      };
+    }
+
+    const wallet = walletRes.rows[0];
+
+    if (wallet.is_locked) {
+      if (isPool) await client.query('ROLLBACK');
+      return {
+        success: false,
+        deducted: false,
+        balanceExhausted: true,
+        error: 'wallet_locked',
+      };
+    }
+
+    const rate = Number(monetization.per_minute_rate || 1.0);
+    const freeTrialMins = Number(wallet.free_trial_minutes || 0);
+    const balanceMins = Number(wallet.balance_minutes || 0);
+    const balanceAmount = Number(wallet.balance_amount || 0);
+
+    let minuteCost = 0.0;
+    let deductionType = '';
+    let updatedWallet = null;
+
+    if (freeTrialMins > 0) {
+      deductionType = 'free_trial';
+      minuteCost = 0.0;
+      const updateRes = await client.query(
+        `UPDATE wallets
+         SET free_trial_minutes = free_trial_minutes - 1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING balance_amount, balance_minutes, free_trial_minutes;`,
+        [wallet.id]
+      );
+      updatedWallet = updateRes.rows[0];
+
+      await client.query(
+        `INSERT INTO wallet_transactions (wallet_id, user_id, type, amount, minutes, call_session_id, reason)
+         VALUES ($1, $2, 'debit', 0.00, 1, $3, 'Call minute deduction (Free trial)');`,
+        [wallet.id, callerId, isValidUUID(sessionId) ? sessionId : null]
+      );
+    } else if (balanceMins > 0) {
+      deductionType = 'prepaid_minute';
+      minuteCost = 0.0;
+      const updateRes = await client.query(
+        `UPDATE wallets
+         SET balance_minutes = balance_minutes - 1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING balance_amount, balance_minutes, free_trial_minutes;`,
+        [wallet.id]
+      );
+      updatedWallet = updateRes.rows[0];
+
+      await client.query(
+        `INSERT INTO wallet_transactions (wallet_id, user_id, type, amount, minutes, call_session_id, reason)
+         VALUES ($1, $2, 'debit', 0.00, 1, $3, 'Call minute deduction (Prepaid minute)');`,
+        [wallet.id, callerId, isValidUUID(sessionId) ? sessionId : null]
+      );
+    } else if (balanceAmount >= rate) {
+      deductionType = 'balance_amount';
+      minuteCost = rate;
+      const updateRes = await client.query(
+        `UPDATE wallets
+         SET balance_amount = balance_amount - $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2
+         RETURNING balance_amount, balance_minutes, free_trial_minutes;`,
+        [rate, wallet.id]
+      );
+      updatedWallet = updateRes.rows[0];
+
+      await client.query(
+        `INSERT INTO wallet_transactions (wallet_id, user_id, type, amount, minutes, call_session_id, reason)
+         VALUES ($1, $2, 'debit', $3, 1, $4, 'Call minute deduction');`,
+        [wallet.id, callerId, rate, isValidUUID(sessionId) ? sessionId : null]
+      );
+    } else {
+      // Balance is insufficient to cover this minute
+      if (isPool) await client.query('ROLLBACK');
+      return {
+        success: false,
+        deducted: false,
+        balanceExhausted: true,
+        remainingMinutes: 0,
+        balanceAmount: balanceAmount,
+        currency: monetization.currency || 'INR',
+      };
+    }
+
+    // Update call_sessions record with charged amount & minutes
+    try {
+      await client.query(
+        `UPDATE call_sessions
+         SET amount_charged = amount_charged + $1,
+             minutes_charged = minutes_charged + 1
+         WHERE call_code = $2;`,
+        [minuteCost, callCode]
+      );
+    } catch (sessionErr) {
+      logger.warn('Failed to update call_sessions during minute deduction:', sessionErr.message);
+    }
+
+    if (isPool) {
+      await client.query('COMMIT');
+    }
+
+    const remTrial = Number(updatedWallet.free_trial_minutes || 0);
+    const remPrepaid = Number(updatedWallet.balance_minutes || 0);
+    const remAmount = Number(updatedWallet.balance_amount || 0);
+    const remMinutes = remTrial + remPrepaid + Math.floor(remAmount / rate);
+    const balanceExhausted = remMinutes <= 0;
+    const warning = remMinutes === 1;
+
+    return {
+      success: true,
+      deducted: true,
+      deductionType,
+      amountCharged: minuteCost,
+      remainingMinutes: remMinutes,
+      balanceAmount: remAmount,
+      currency: monetization.currency || 'INR',
+      balanceExhausted,
+      warning,
+    };
+  } catch (error) {
+    if (isPool) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    logger.error('Error during call minute deduction:', error.message);
+    throw error;
+  } finally {
+    if (shouldRelease && typeof client.release === 'function') {
+      client.release();
+    }
+  }
+}
+
+/**
+ * 4. Start in-call active billing timer.
+ * Emits billing:balance every minute, billing:warning at 1 minute remaining,
+ * and automatically ends the call when balance reaches zero.
+ */
+export function startCallBillingTimer({
+  io,
+  callCode,
+  callerId,
+  sessionId,
+  intervalMs = 60000,
+  db = pool,
+  onBalanceExhausted,
+}) {
+  if (!callCode) return null;
+  if (activeBillingTimers.has(callCode)) {
+    return activeBillingTimers.get(callCode);
+  }
+
+  logger.info(`[Billing Timer] Started billing timer for session: ${callCode} (Interval: ${intervalMs}ms)`);
+
+  const timerId = setInterval(async () => {
+    try {
+      // Check if session is still tracked
+      const session = callSessionManager.getSession(callCode);
+      if (!session) {
+        stopCallBillingTimer(callCode);
+        return;
+      }
+
+      const result = await deductCallMinute(db, { callCode, callerId, sessionId });
+
+      if (result.deducted) {
+        logger.info(
+          `[Billing] Deducted 1 min for session ${callCode}: charged ${result.amountCharged}, ${result.remainingMinutes} mins remaining`
+        );
+
+        if (io) {
+          const callerSocketId = userSocketMap.getSocketId(callerId);
+          if (callerSocketId) {
+            io.to(callerSocketId).emit(SOCKET_EVENTS.BILLING_BALANCE, {
+              callCode,
+              balanceAmount: result.balanceAmount,
+              remainingMinutes: result.remainingMinutes,
+              currency: result.currency,
+            });
+
+            if (result.warning) {
+              logger.info(`[Billing] Emitting low balance warning to caller ${callerId} for session: ${callCode}`);
+              io.to(callerSocketId).emit(SOCKET_EVENTS.BILLING_WARNING, {
+                callCode,
+                message: '1 minute of call balance remaining.',
+                remainingMinutes: 1,
+              });
+            }
+          }
+        }
+      }
+
+      if (result.balanceExhausted) {
+        logger.info(`[Billing] Balance exhausted for session: ${callCode}. Terminating call automatically.`);
+        stopCallBillingTimer(callCode);
+
+        if (typeof onBalanceExhausted === 'function') {
+          await onBalanceExhausted({ callCode, callerId, sessionId });
+        } else {
+          // Dynamic import to prevent circular dependency
+          const { endCall } = await import('./call.service.js');
+          const endRes = await endCall({ callCode, userId: callerId, reason: 'balance_exhausted' });
+
+          if (io) {
+            const endedPayload = {
+              callCode,
+              durationSeconds: endRes.durationSeconds || 0,
+              reason: 'balance_exhausted',
+            };
+
+            io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, endedPayload);
+
+            // Also emit directly to caller socket in case room was not joined
+            const callerSocketId = userSocketMap.getSocketId(callerId);
+            if (callerSocketId) {
+              io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, endedPayload);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      logger.error(`Error in billing timer interval for ${callCode}:`, err.message);
+    }
+  }, intervalMs);
+
+  const timerEntry = {
+    timerId,
+    callCode,
+    callerId,
+    sessionId,
+    intervalMs,
+  };
+
+  activeBillingTimers.set(callCode, timerEntry);
+  return timerEntry;
+}
+
+/**
+ * 5. Stop active billing timer for a call session
+ */
+export function stopCallBillingTimer(callCode) {
+  if (activeBillingTimers.has(callCode)) {
+    const entry = activeBillingTimers.get(callCode);
+    clearInterval(entry.timerId);
+    activeBillingTimers.delete(callCode);
+    logger.info(`[Billing Timer] Stopped billing timer for session: ${callCode}`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 6. Check if billing timer is currently running for a callCode
+ */
+export function isCallBillingTimerActive(callCode) {
+  return activeBillingTimers.has(callCode);
+}
+
+/**
+ * 7. Clear all billing timers (useful for tests and graceful server shutdown)
+ */
+export function clearAllBillingTimers() {
+  for (const [callCode, entry] of activeBillingTimers.entries()) {
+    clearInterval(entry.timerId);
+  }
+  activeBillingTimers.clear();
+}
+
+/**
+ * 8. Count of currently running billing timers
+ */
+export function getActiveBillingTimerCount() {
+  return activeBillingTimers.size;
 }
