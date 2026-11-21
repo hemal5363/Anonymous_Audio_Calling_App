@@ -12,7 +12,7 @@ export async function getWallet(req, res, next) {
 
     // Fetch user wallet, provision default if not yet created
     let { rows } = await pool.query(
-      `SELECT balance_amount, balance_minutes, free_trial_minutes, is_locked, currency 
+      `SELECT balance_amount, balance_minutes, free_trial_minutes, is_locked 
        FROM wallets 
        WHERE user_id = $1;`,
       [userId]
@@ -21,12 +21,11 @@ export async function getWallet(req, res, next) {
     let wallet;
     if (rows.length === 0) {
       const defaultTrial = monetization.free_trial_minutes_new_user || 10;
-      const currency = monetization.currency || 'INR';
       const insertRes = await pool.query(
-        `INSERT INTO wallets (user_id, balance_amount, balance_minutes, free_trial_minutes, currency)
-         VALUES ($1, '0.00', 0, $2, $3)
-         RETURNING balance_amount, balance_minutes, free_trial_minutes, is_locked, currency;`,
-        [userId, defaultTrial, currency]
+        `INSERT INTO wallets (user_id, balance_amount, balance_minutes, free_trial_minutes)
+         VALUES ($1, '0.00', 0, $2)
+         RETURNING balance_amount, balance_minutes, free_trial_minutes, is_locked;`,
+        [userId, defaultTrial]
       );
       wallet = insertRes.rows[0];
     } else {
@@ -39,7 +38,7 @@ export async function getWallet(req, res, next) {
         balance_minutes: parseInt(wallet.balance_minutes || 0, 10),
         free_trial_minutes: parseInt(wallet.free_trial_minutes || 0, 10),
         is_locked: Boolean(wallet.is_locked),
-        currency: wallet.currency || monetization.currency || 'INR',
+        currency: monetization.currency || 'INR',
       },
       current_mode: monetization.mode || 'free',
       rate_per_minute: String(monetization.per_minute_rate || '1.00'),

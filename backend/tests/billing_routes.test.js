@@ -47,7 +47,6 @@ describe('Billing Endpoints (GET /billing/wallet, GET /billing/subscription)', (
               balance_minutes: 30,
               free_trial_minutes: 5,
               is_locked: false,
-              currency: 'INR',
             },
           ],
         });
