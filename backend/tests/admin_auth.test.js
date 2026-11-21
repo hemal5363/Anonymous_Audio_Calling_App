@@ -141,6 +141,62 @@ describe('Admin Authorization & Endpoints', () => {
     });
   });
 
+  describe('CORS & Admin Access from Admin Panel Origin', () => {
+    it('should include Access-Control-Allow-Origin header for configured admin origin (http://localhost:5173)', async () => {
+      const res = await request(app)
+        .options('/admin/settings')
+        .set('Origin', 'http://localhost:5173')
+        .set('Access-Control-Request-Method', 'GET');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('should NOT include Access-Control-Allow-Origin for unauthorized origin', async () => {
+      const res = await request(app)
+        .get('/admin/settings')
+        .set('Origin', 'http://unauthorized-evil-domain.com');
+
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+    it('should still reject unauthenticated request with 401 even when sent from allowed admin origin', async () => {
+      const res = await request(app)
+        .get('/admin/settings')
+        .set('Origin', 'http://localhost:5173');
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('Unauthorized');
+    });
+
+    it('should still reject normal user token with 403 even when sent from allowed admin origin', async () => {
+      const res = await request(app)
+        .get('/admin/settings')
+        .set('Origin', 'http://localhost:5173')
+        .set('Authorization', `Bearer ${normalUserToken}`);
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('Forbidden');
+    });
+
+    it('should allow request with valid admin token from allowed admin origin', async () => {
+      querySpy
+        .mockResolvedValueOnce({ rows: [mockAdmin] })
+        .mockResolvedValueOnce({ rows: [{ key: 'monetization', value_json: { mode: 'free' } }] });
+
+      const res = await request(app)
+        .get('/admin/settings')
+        .set('Origin', 'http://localhost:5173')
+        .set('Authorization', `Bearer ${validAdminToken}`);
+
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+      expect(res.status).toBe(200);
+      expect(res.body.monetization).toEqual({ mode: 'free' });
+    });
+  });
+
   describe('Authenticated Admin Endpoints', () => {
     it('GET /admin/settings should return settings object when authenticated with Admin token', async () => {
       querySpy

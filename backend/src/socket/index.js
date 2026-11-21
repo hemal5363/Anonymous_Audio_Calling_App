@@ -27,10 +27,12 @@ let ioInstance = null;
  * Initialize Socket.io on the provided HTTP server
  */
 export function initSocketServer(httpServer) {
+  const allowedOrigins = config.cors.getAllowedOrigins();
   const io = new Server(httpServer, {
     cors: {
-      origin: '*',
+      origin: allowedOrigins.includes('*') ? '*' : allowedOrigins,
       methods: ['GET', 'POST'],
+      credentials: true,
     },
     pingTimeout: 20000,
     pingInterval: 25000,

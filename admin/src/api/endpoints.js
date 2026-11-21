@@ -1,0 +1,27 @@
+/**
+ * Admin API Endpoints
+ * Maps to backend Express routes as defined in docs/API_SPEC.md
+ */
+export const API_ENDPOINTS = {
+  // Auth
+  LOGIN: '/admin/auth/login',
+
+  // Settings
+  SETTINGS: '/admin/settings',
+  SETTING_BY_KEY: (key) => `/admin/settings/${key}`,
+
+  // Users
+  USERS: '/admin/users',
+  USER_STATUS: (id) => `/admin/users/${id}/status`,
+  USER_WALLET: (id) => `/admin/users/${id}/wallet`,
+
+  // Abuse Reports
+  REPORTS: '/admin/reports',
+  REPORT_ACTION: (id) => `/admin/reports/${id}`,
+
+  // Dashboard Stats
+  STATS: '/admin/stats',
+
+  // Call Logs & History
+  CALL_LOGS: '/calls/history',
+};

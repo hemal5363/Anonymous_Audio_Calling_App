@@ -15,6 +15,7 @@ const envSchema = z.object({
   TURN_SERVER_TCP_URL: z.string().default('turn:turn.example.com:3478?transport=tcp'),
   TURN_USERNAME: z.string().default('turn_user'),
   TURN_CREDENTIAL: z.string().default('turn_secret_password'),
+  ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5173'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -33,6 +34,15 @@ export const config = {
   jwt: {
     secret: parsed.data.JWT_SECRET,
     refreshSecret: parsed.data.JWT_REFRESH_SECRET,
+  },
+  cors: {
+    adminOrigin: parsed.data.ADMIN_CORS_ORIGIN,
+    getAllowedOrigins() {
+      return parsed.data.ADMIN_CORS_ORIGIN
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    },
   },
   webrtc: {
     stunUrl: parsed.data.STUN_SERVER_URL,

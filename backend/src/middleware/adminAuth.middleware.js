@@ -6,6 +6,11 @@ import { pool } from '../db/index.js';
  * Normal user tokens are strictly rejected with 403 Forbidden.
  */
 export async function authenticateAdmin(req, res, next) {
+  // Allow preflight OPTIONS requests to pass to CORS handler
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {

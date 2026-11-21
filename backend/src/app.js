@@ -8,13 +8,35 @@ import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import callsRoutes from './routes/calls.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import { config } from './config/index.js';
 import { getHealth } from './controllers/health.controller.js';
 
 const app = express();
 
 // Security and standard middlewares
 app.use(helmet());
-app.use(cors());
+
+// CORS configuration reading allowed origins from environment
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests with no origin (mobile app, curl, server-to-server)
+    if (!origin) {
+      return callback(null, true);
+    }
+    const allowedOrigins = config.cors.getAllowedOrigins();
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Authorization'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(globalLimiter);
 
