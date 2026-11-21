@@ -14,13 +14,14 @@ import { useNavigation } from '@react-navigation/native';
 import { HomeScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
 import { useSocket } from '../socket/useSocket';
+import { connectSocket } from '../socket';
 import { useCall } from '../call/CallContext';
 import { api } from '../api/client';
 
 export default function HomeScreen() {
   const navigation = useNavigation<HomeScreenNavigationProp>();
   const { user, logout, updateUser } = useAuth();
-  const { isConnected } = useSocket();
+  const { isConnected, socketError } = useSocket();
   const { callStatus, startFind, lastEndInfo, clearEndInfo } = useCall();
 
   // Availability state
@@ -34,6 +35,16 @@ export default function HomeScreen() {
   useEffect(() => {
     setIsAvailable(Boolean(user?.is_available));
   }, [user?.is_available]);
+
+  // Ensure socket connection is actively established when user is authenticated on HomeScreen
+  useEffect(() => {
+    if (user && !isConnected) {
+      console.log('[HomeScreen] User authenticated, ensuring socket is connected...');
+      connectSocket().catch((err) => {
+        console.warn('[HomeScreen] connectSocket caught error:', err);
+      });
+    }
+  }, [user, isConnected]);
 
   // Navigate reactively to call screens based on active call status
   useEffect(() => {
@@ -150,15 +161,40 @@ export default function HomeScreen() {
           <View
             style={[
               styles.connectionDot,
-              isConnected ? styles.dotConnected : styles.dotConnecting,
+              isConnected
+                ? styles.dotConnected
+                : socketError
+                ? styles.dotError
+                : styles.dotConnecting,
             ]}
           />
-          <Text style={styles.connectionStatusText}>
-            {isConnected ? 'Server Connected' : 'Connecting to server...'}
+          <Text
+            style={[
+              styles.connectionStatusText,
+              Boolean(socketError) && !isConnected && styles.connectionStatusErrorText,
+            ]}
+          >
+            {isConnected
+              ? 'Server Connected'
+              : socketError
+              ? `Socket: ${socketError}`
+              : 'Connecting to server...'}
           </Text>
-          {!isConnected && (
+          {!isConnected && !socketError && (
             <ActivityIndicator size="small" color="#f59e0b" style={styles.connectingSpinner} />
           )}
+          {!isConnected && socketError ? (
+            <TouchableOpacity
+              onPress={() => {
+                console.log('[HomeScreen] User requested socket reconnect');
+                connectSocket().catch(() => {});
+              }}
+              style={styles.retryPillButton}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.retryPillButtonText}>Retry</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
 
         {/* Call Finished / End Reason Banner */}
@@ -247,6 +283,8 @@ export default function HomeScreen() {
           <Text style={styles.callZoneSubtitle}>
             {isConnected
               ? 'Tap CALL to connect with an available partner'
+              : socketError
+              ? `Socket: ${socketError}`
               : 'Waiting for server connection to enable calls...'}
           </Text>
         </View>
@@ -400,10 +438,30 @@ const styles = StyleSheet.create({
   dotConnecting: {
     backgroundColor: '#f59e0b',
   },
+  dotError: {
+    backgroundColor: '#ef4444',
+  },
   connectionStatusText: {
     fontSize: 11,
     fontWeight: '600',
     color: '#cbd5e1',
+  },
+  connectionStatusErrorText: {
+    color: '#fca5a5',
+  },
+  retryPillButton: {
+    marginLeft: 8,
+    backgroundColor: '#334155',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  retryPillButtonText: {
+    color: '#38bdf8',
+    fontSize: 10,
+    fontWeight: '700',
   },
   connectingSpinner: {
     marginLeft: 6,

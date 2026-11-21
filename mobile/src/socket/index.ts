@@ -32,17 +32,23 @@ export const SOCKET_EVENTS = {
   BILLING_WARNING: 'billing:warning',
 } as const;
 
-type StatusListener = (connected: boolean) => void;
+type StatusListener = (connected: boolean, error: string | null) => void;
 const statusListeners = new Set<StatusListener>();
 
 let socketInstance: Socket | null = null;
 let isSocketConnected = false;
+let lastSocketError: string | null = null;
 
-function notifyListeners(connected: boolean) {
+function notifyListeners(connected: boolean, error: string | null = null) {
   isSocketConnected = connected;
+  if (connected) {
+    lastSocketError = null;
+  } else if (error !== null) {
+    lastSocketError = error;
+  }
   statusListeners.forEach((listener) => {
     try {
-      listener(connected);
+      listener(connected, lastSocketError);
     } catch {
       // Ignore listener error
     }
@@ -50,12 +56,12 @@ function notifyListeners(connected: boolean) {
 }
 
 /**
- * Subscribe to socket connection state changes
+ * Subscribe to socket connection state changes and error messages
  */
 export function subscribeSocketStatus(listener: StatusListener): () => void {
   statusListeners.add(listener);
   // Immediately emit current state
-  listener(isSocketConnected);
+  listener(isSocketConnected, lastSocketError);
   return () => {
     statusListeners.delete(listener);
   };
@@ -69,31 +75,64 @@ export function getIsSocketConnected(): boolean {
 }
 
 /**
+ * Current socket connection error message (if any)
+ */
+export function getSocketError(): string | null {
+  return lastSocketError;
+}
+
+/**
  * Establishes an authenticated WebSocket connection with the backend
  */
-export async function connectSocket(): Promise<Socket> {
+export async function connectSocket(): Promise<Socket | null> {
+  const socketPath = '/socket.io';
+
+  // Read access token after login (ensure it exists before connecting)
+  const accessToken = await tokenStorage.getAccessToken();
+  if (!accessToken) {
+    const errorMsg = 'No access token available. Please log in before connecting socket.';
+    console.warn('[Socket]', errorMsg);
+    notifyListeners(false, errorMsg);
+    return null;
+  }
+
+  const formattedToken = accessToken.startsWith('Bearer ') ? accessToken : `Bearer ${accessToken}`;
+
+  console.log('[Socket] Initializing connection to URL:', API_URL);
+  console.log('[Socket] Path:', socketPath);
+  console.log('[Socket] Transports: ["websocket", "polling"]');
+  console.log('[Socket] Token present, length:', accessToken.length);
+
   if (socketInstance) {
+    // Update auth and headers on existing socket instance
+    socketInstance.auth = { token: formattedToken };
+    if ((socketInstance.io as any)?.opts) {
+      (socketInstance.io as any).opts.extraHeaders = { Authorization: formattedToken };
+      (socketInstance.io as any).opts.query = { token: formattedToken };
+    }
     if (socketInstance.connected) {
-      notifyListeners(true);
+      console.log('[Socket] Already connected with socket ID:', socketInstance.id);
+      notifyListeners(true, null);
       return socketInstance;
     }
-    const token = await tokenStorage.getAccessToken();
-    if (token) {
-      socketInstance.auth = {
-        token: `Bearer ${token}`,
-      };
-    }
+    console.log('[Socket] Existing socket was disconnected. Calling socket.connect()...');
     socketInstance.connect();
     return socketInstance;
   }
 
-  const accessToken = await tokenStorage.getAccessToken();
-
+  // Create Socket.io client instance supporting both websocket and polling transports
   socketInstance = io(API_URL, {
-    transports: ['websocket'],
+    path: socketPath,
+    transports: ['websocket', 'polling'], // Allow both websocket and polling
     autoConnect: false,
     auth: {
-      token: accessToken ? `Bearer ${accessToken}` : '',
+      token: formattedToken,
+    },
+    extraHeaders: {
+      Authorization: formattedToken,
+    },
+    query: {
+      token: formattedToken,
     },
     reconnection: true,
     reconnectionAttempts: Infinity,
@@ -103,27 +142,38 @@ export async function connectSocket(): Promise<Socket> {
   });
 
   socketInstance.on('connect', () => {
-    notifyListeners(true);
+    console.log('[Socket] CONNECTED successfully! Socket ID:', socketInstance?.id);
+    notifyListeners(true, null);
     // Send presence handshake upon connecting
     socketInstance?.emit(SOCKET_EVENTS.PRESENCE_HELLO);
   });
 
-  socketInstance.on('reconnect_attempt', async () => {
-    // Refresh auth token before reconnecting
+  socketInstance.on('presence:ack', (payload) => {
+    console.log('[Socket] Presence acknowledged by server:', payload);
+  });
+
+  socketInstance.on('connect_error', (err: Error) => {
+    const errorMsg = err?.message || 'Connection error';
+    console.error('[Socket] CONNECT_ERROR:', errorMsg, err);
+    notifyListeners(false, errorMsg);
+  });
+
+  socketInstance.on('disconnect', (reason: string) => {
+    console.log('[Socket] DISCONNECTED, reason:', reason);
+    notifyListeners(false, reason === 'io client disconnect' ? null : `Disconnected: ${reason}`);
+  });
+
+  socketInstance.on('reconnect_attempt', async (attempt: number) => {
+    console.log('[Socket] Reconnect attempt #', attempt);
     const freshToken = await tokenStorage.getAccessToken();
-    if (socketInstance) {
-      socketInstance.auth = {
-        token: freshToken ? `Bearer ${freshToken}` : '',
-      };
+    if (freshToken && socketInstance) {
+      const freshFormatted = freshToken.startsWith('Bearer ') ? freshToken : `Bearer ${freshToken}`;
+      socketInstance.auth = { token: freshFormatted };
+      if ((socketInstance.io as any)?.opts) {
+        (socketInstance.io as any).opts.extraHeaders = { Authorization: freshFormatted };
+        (socketInstance.io as any).opts.query = { token: freshFormatted };
+      }
     }
-  });
-
-  socketInstance.on('disconnect', () => {
-    notifyListeners(false);
-  });
-
-  socketInstance.on('connect_error', () => {
-    notifyListeners(false);
   });
 
   socketInstance.connect();
@@ -142,9 +192,10 @@ export function getSocket(): Socket | null {
  */
 export function disconnectSocket(): void {
   if (socketInstance) {
+    console.log('[Socket] Disconnecting socket instance manually.');
     socketInstance.removeAllListeners();
     socketInstance.disconnect();
     socketInstance = null;
   }
-  notifyListeners(false);
+  notifyListeners(false, null);
 }

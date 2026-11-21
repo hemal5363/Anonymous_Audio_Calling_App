@@ -29,19 +29,22 @@ let ioInstance = null;
 export function initSocketServer(httpServer) {
   const allowedOrigins = config.cors.getAllowedOrigins();
   const isWildcard = allowedOrigins.includes('*');
+
   const io = new Server(httpServer, {
+    path: '/socket.io',
+    transports: ['websocket', 'polling'], // Allow both websocket and polling
     cors: {
-      origin: isWildcard
-        ? '*'
-        : (origin, callback) => {
-            if (!origin) return callback(null, true);
-            const cleanOrigin = origin.replace(/\/$/, '');
-            const allowed = config.cors.getAllowedOrigins();
-            if (allowed.includes('*') || allowed.includes(cleanOrigin) || allowed.includes(origin)) {
-              return callback(null, true);
-            }
-            return callback(new Error('Not allowed by CORS'));
-          },
+      origin: (origin, callback) => {
+        // Non-browser or mobile clients (curl, React Native, Expo) may send no origin
+        if (!origin) return callback(null, true);
+        const cleanOrigin = origin.replace(/\/$/, '');
+        const allowed = config.cors.getAllowedOrigins();
+        if (allowed.includes('*') || allowed.includes(cleanOrigin) || allowed.includes(origin)) {
+          return callback(null, true);
+        }
+        logger.warn(`[Socket CORS] Origin rejected: "${origin}". Allowed origins: ${allowed.join(', ')}`);
+        return callback(new Error(`Not allowed by CORS: ${origin}`));
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },
@@ -60,13 +63,18 @@ export function initSocketServer(httpServer) {
     // Join personal room for targeted emits by userId
     socket.join(`user:${userId}`);
 
-    logger.info(`Socket connected: [socketId: ${socket.id}, userId: ${userId}, totalOnline: ${userSocketMap.getOnlineCount()}]`);
+    logger.info(`Socket connected successfully: [socketId: ${socket.id}, userId: ${userId}, totalOnline: ${userSocketMap.getOnlineCount()}]`);
 
     // -----------------------------------------------------------------------
     // 1. Presence & Setup
     // -----------------------------------------------------------------------
     socket.on(SOCKET_EVENTS.PRESENCE_HELLO, () => {
       logger.info(`Presence confirmed: [userId: ${userId}, socketId: ${socket.id}]`);
+      socket.emit('presence:ack', {
+        userId,
+        socketId: socket.id,
+        connectedAt: new Date().toISOString(),
+      });
     });
 
     // -----------------------------------------------------------------------
