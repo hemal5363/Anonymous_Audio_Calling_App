@@ -94,6 +94,7 @@ export async function declineCall({ callCode, calleeId, reason = 'declined' }) {
        WHERE call_code = $1;`,
       [callCode]
     );
+    await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [callCode]);
 
     return {
       success: true,
@@ -117,6 +118,7 @@ export async function declineCall({ callCode, calleeId, reason = 'declined' }) {
        WHERE call_code = $1;`,
       [callCode]
     );
+    await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [callCode]);
   } catch (err) {
     logger.warn('Failed to update call_session to declined in DB:', err.message);
   }
@@ -149,6 +151,7 @@ export async function handleRingingTimeout({ callCode }) {
        WHERE call_code = $1;`,
       [callCode]
     );
+    await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [callCode]);
   } catch (err) {
     logger.warn('Failed to update call_session to missed in DB:', err.message);
   }
@@ -202,7 +205,19 @@ export async function endCall({ callCode, userId, reason = null }) {
 
   // Determine valid end reason
   let finalReason = reason;
-  if (!finalReason) {
+  const allowedReasons = [
+    'caller_hangup',
+    'callee_hangup',
+    'declined',
+    'ring_timeout',
+    'skipped',
+    'balance_exhausted',
+    'network_error',
+    'system_shutdown',
+    'caller_left',
+    'cancelled',
+  ];
+  if (!finalReason || !allowedReasons.includes(finalReason)) {
     if (session?.status === 'ringing' && !session?.connectedAt && userId === callerId) {
       finalReason = 'caller_left';
     } else {
@@ -218,6 +233,7 @@ export async function endCall({ callCode, userId, reason = null }) {
        WHERE call_code = $3;`,
       [finalReason, durationSeconds, callCode]
     );
+    await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [callCode]);
   } catch (err) {
     logger.warn('Failed to update call_session to ended in DB:', err.message);
   }
@@ -296,21 +312,32 @@ export async function reportPeerDuringCall({ callCode, reporterId, reason, note 
     [sessionId, reporterId, reportedId, reason, note || null]
   );
 
-  // Check auto-suspension threshold (default 3 reports in 24 hours)
-  const reportCountRes = await pool.query(
-    `SELECT COUNT(*) as count 
-     FROM reports 
-     WHERE reported_id = $1 AND created_at >= (NOW() - INTERVAL '24 hours');`,
-    [reportedId]
-  );
+  // Auto-Moderation: Check if reported user received reports from several different users
+  try {
+    let threshold = 3;
+    const settingsRes = await pool.query("SELECT value_json FROM app_settings WHERE key = 'moderation';");
+    if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.flag_report_threshold) {
+      threshold = Number(settingsRes.rows[0].value_json.flag_report_threshold);
+    }
 
-  const reportCount = parseInt(reportCountRes.rows[0]?.count || 0, 10);
-  if (reportCount >= 3) {
-    await pool.query(
-      `UPDATE users SET status = 'suspended', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
+    const reportCountRes = await pool.query(
+      `SELECT COUNT(DISTINCT reporter_id) as count 
+       FROM reports 
+       WHERE reported_id = $1 AND status != 'dismissed';`,
       [reportedId]
     );
-    logger.warn(`User ${reportedId} automatically suspended: reached ${reportCount} reports in 24 hours.`);
+
+    const distinctReports = parseInt(reportCountRes.rows[0]?.count || 0, 10);
+    if (distinctReports >= threshold) {
+      // Mark as flagged for admin review without auto-banning
+      await pool.query(
+        `UPDATE users SET is_flagged = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
+        [reportedId]
+      );
+      logger.warn(`User ${reportedId} marked as flagged for admin review: reached ${distinctReports} distinct reports (threshold: ${threshold}).`);
+    }
+  } catch (err) {
+    logger.error('Error checking automated moderation threshold:', err.message);
   }
 
   logger.info(`Report submitted: [callCode: ${callCode}, reporterId: ${reporterId}, reportedId: ${reportedId}, reason: ${reason}]`);

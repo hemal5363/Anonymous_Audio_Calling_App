@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   adminLogin,
+  changeAdminPassword,
   getSettings,
   updateSetting,
   listUsers,
@@ -20,6 +21,9 @@ router.post('/auth/login', loginRateLimiter, adminLogin);
 
 // All subsequent admin routes strictly require an Admin token!
 router.use(authenticateAdmin);
+
+// 6.1b Admin Password Update (Enforces strong password policy)
+router.patch('/auth/password', changeAdminPassword);
 
 // 6.2 Settings (Get & Update monetization mode, mobile login toggle, rates, etc.)
 router.get('/settings', getSettings);

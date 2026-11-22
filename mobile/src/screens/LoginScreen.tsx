@@ -14,6 +14,7 @@ import { useNavigation } from '@react-navigation/native';
 import { LoginScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
 import { getAuthConfig } from '../api/auth';
+import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 
 export default function LoginScreen() {
   const navigation = useNavigation<LoginScreenNavigationProp>();
@@ -21,6 +22,7 @@ export default function LoginScreen() {
 
   const [authMode, setAuthMode] = useState<'email' | 'phone'>('email');
   const [mobileLoginEnabled, setMobileLoginEnabled] = useState<boolean>(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState<boolean>(false);
 
   // Email form state
   const [email, setEmail] = useState('');
@@ -245,7 +247,19 @@ export default function LoginScreen() {
               <Text style={styles.footerLink}> Create Account</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Privacy Policy Link (Google Play Requirement) */}
+          <View style={styles.privacyFooterContainer}>
+            <TouchableOpacity onPress={() => setShowPrivacyModal(true)} activeOpacity={0.7}>
+              <Text style={styles.privacyFooterLink}>Privacy Policy & Data Safety</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        <PrivacyPolicyModal
+          visible={showPrivacyModal}
+          onClose={() => setShowPrivacyModal(false)}
+        />
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -397,5 +411,17 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontSize: 13,
     fontWeight: '600',
+  },
+  privacyFooterContainer: {
+    alignItems: 'center',
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+  },
+  privacyFooterLink: {
+    color: '#64748b',
+    fontSize: 12,
+    textDecorationLine: 'underline',
   },
 });

@@ -53,17 +53,19 @@ describe('Admin Authorization & Endpoints', () => {
 
     it('should return 401 on incorrect password', async () => {
       const hash = await bcrypt.hash('CorrectPass123!', 10);
-      querySpy.mockResolvedValueOnce({
-        rows: [
-          {
-            id: mockAdmin.id,
-            email: mockAdmin.email,
-            password_hash: hash,
-            role: 'superadmin',
-            is_active: true,
-          },
-        ],
-      });
+      querySpy
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: mockAdmin.id,
+              email: mockAdmin.email,
+              password_hash: hash,
+              role: 'superadmin',
+              is_active: true,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rowCount: 1 });
 
       const res = await request(app)
         .post('/admin/auth/login')
@@ -296,6 +298,132 @@ describe('Admin Authorization & Endpoints', () => {
       expect(res.body.calls[0].email).toBeUndefined();
       expect(res.body.calls[0].phone).toBeUndefined();
       expect(res.body.pagination.total).toBe(1);
+    });
+  });
+
+  describe('PATCH /admin/auth/password (Strong Admin Password Policy)', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .send({ current_password: 'OldPassword123!', new_password: 'NewStrongPassword123!' });
+
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects standard user tokens with 403', async () => {
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${normalUserToken}`)
+        .send({ current_password: 'OldPassword123!', new_password: 'NewStrongPassword123!' });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('rejects passwords shorter than 12 characters', async () => {
+      querySpy.mockResolvedValueOnce({
+        rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+      });
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: 'OldPassword123!', new_password: 'Short1!' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('at least 12 characters');
+    });
+
+    it('rejects passwords without special character', async () => {
+      querySpy.mockResolvedValueOnce({
+        rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+      });
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: 'OldPassword123!', new_password: 'NoSpecialCharacter123' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('special character');
+    });
+
+    it('rejects passwords without numbers', async () => {
+      querySpy.mockResolvedValueOnce({
+        rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+      });
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: 'OldPassword123!', new_password: 'NoDigitsAtAllHere!' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('digit');
+    });
+
+    it('rejects if current password is incorrect', async () => {
+      const hash = await bcrypt.hash('RealCurrentPass123!', 10);
+      // authenticateAdmin query:
+      querySpy
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+        })
+        // changeAdminPassword query:
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, password_hash: hash }],
+        });
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: 'WrongCurrentPass!', new_password: 'BrandNewValidPass123!' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.message).toContain('does not match');
+    });
+
+    it('rejects if new password is identical to current password', async () => {
+      const pass = 'IdenticalPassword123!';
+      const hash = await bcrypt.hash(pass, 10);
+      querySpy
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, password_hash: hash }],
+        });
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: pass, new_password: pass });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('cannot be identical');
+    });
+
+    it('successfully changes password when complying with strong policy', async () => {
+      const currentPass = 'CurrentValidPassword123!';
+      const newPass = 'BrandNewValidPassword456!';
+      const hash = await bcrypt.hash(currentPass, 10);
+
+      querySpy
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, password_hash: hash }],
+        })
+        .mockResolvedValueOnce({ rowCount: 1 }); // UPDATE query
+
+      const res = await request(app)
+        .patch('/admin/auth/password')
+        .set('Authorization', `Bearer ${validAdminToken}`)
+        .send({ current_password: currentPass, new_password: newPass });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toContain('updated successfully');
     });
   });
 

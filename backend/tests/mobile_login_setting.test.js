@@ -75,6 +75,7 @@ describe('Mobile Login Admin Setting & OTP Flow', () => {
         .mockResolvedValueOnce({
           rows: [{ value_json: { mobile_login_enabled: true } }],
         })
+        .mockResolvedValueOnce({ rows: [] }) // cooldown check: no recent OTP
         .mockResolvedValueOnce({ rows: [] }) // invalidate old OTPs
         .mockResolvedValueOnce({ rows: [] }); // insert new OTP
 

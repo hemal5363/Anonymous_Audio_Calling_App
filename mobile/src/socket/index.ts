@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import { API_URL } from '../config';
 import { tokenStorage } from '../auth/tokenStorage';
+import { handleSessionExpired } from '../api/client';
 
 /**
  * Socket.IO event names matching backend implementation and docs/CALL_FLOW.md
@@ -149,11 +150,22 @@ export async function connectSocket(): Promise<Socket | null> {
   });
 
   socketInstance.on('connect_error', (err: any) => {
-    const errorMsg = err?.message || 'Connection error';
-    const description = err?.description ? ` (${typeof err.description === 'object' ? JSON.stringify(err.description) : err.description})` : '';
-    const fullMsg = `${errorMsg}${description}`;
-    console.error('[Socket] CONNECT_ERROR:', fullMsg);
-    notifyListeners(false, fullMsg);
+    const errorMsg = String(err?.message || 'Connection error');
+    console.error('[Socket] CONNECT_ERROR:', errorMsg);
+    notifyListeners(false, errorMsg);
+
+    // If connection rejected due to expired/invalid JWT or banned account, log out immediately
+    const lower = errorMsg.toLowerCase();
+    if (
+      lower.includes('jwt') ||
+      lower.includes('unauthorized') ||
+      lower.includes('token') ||
+      lower.includes('authentication') ||
+      lower.includes('banned')
+    ) {
+      disconnectSocket();
+      handleSessionExpired().catch(() => {});
+    }
   });
 
   socketInstance.on('disconnect', (reason: string) => {

@@ -30,6 +30,13 @@ export function setOnUnauthorizedCallback(cb: (() => void) | null) {
   onUnauthorizedCallback = cb;
 }
 
+export async function handleSessionExpired(): Promise<void> {
+  await tokenStorage.clearTokens();
+  if (onUnauthorizedCallback) {
+    onUnauthorizedCallback();
+  }
+}
+
 let isRefreshing = false;
 let refreshSubscribers: ((newToken: string | null) => void)[] = [];
 
@@ -48,6 +55,7 @@ function onRefreshed(newToken: string | null) {
 async function refreshAccessToken(): Promise<string | null> {
   const refreshToken = await tokenStorage.getRefreshToken();
   if (!refreshToken) {
+    await handleSessionExpired();
     return null;
   }
 
@@ -59,8 +67,7 @@ async function refreshAccessToken(): Promise<string | null> {
     });
 
     if (!res.ok) {
-      await tokenStorage.clearTokens();
-      if (onUnauthorizedCallback) onUnauthorizedCallback();
+      await handleSessionExpired();
       return null;
     }
 
@@ -74,10 +81,10 @@ async function refreshAccessToken(): Promise<string | null> {
       return data.accessToken;
     }
 
+    await handleSessionExpired();
     return null;
   } catch (err) {
-    await tokenStorage.clearTokens();
-    if (onUnauthorizedCallback) onUnauthorizedCallback();
+    await handleSessionExpired();
     return null;
   }
 }

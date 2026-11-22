@@ -13,6 +13,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { RegisterScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
+import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 
 export default function RegisterScreen() {
   const navigation = useNavigation<RegisterScreenNavigationProp>();
@@ -26,6 +27,7 @@ export default function RegisterScreen() {
   // Mandatory compliance checkboxes
   const [confirmAge18, setConfirmAge18] = useState(false);
   const [acceptTerms, setAcceptTerms] = useState(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -191,7 +193,19 @@ export default function RegisterScreen() {
               <Text style={styles.footerLink}> Sign In</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Privacy Policy Link (Google Play Requirement) */}
+          <View style={styles.privacyFooterContainer}>
+            <TouchableOpacity onPress={() => setShowPrivacyModal(true)} activeOpacity={0.7}>
+              <Text style={styles.privacyFooterLink}>View Privacy Policy & Data Collection Details</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        <PrivacyPolicyModal
+          visible={showPrivacyModal}
+          onClose={() => setShowPrivacyModal(false)}
+        />
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -347,5 +361,17 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontSize: 13,
     fontWeight: '600',
+  },
+  privacyFooterContainer: {
+    alignItems: 'center',
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+  },
+  privacyFooterLink: {
+    color: '#64748b',
+    fontSize: 12,
+    textDecorationLine: 'underline',
   },
 });

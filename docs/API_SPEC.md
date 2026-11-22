@@ -37,6 +37,29 @@ All HTTP errors adhere to the following schema:
 ### Peer Privacy & Anonymity Guarantee
 No user endpoint exposes another user's ID, email, phone number, or IP address. Calls, blocks, and reports reference the ephemeral public `call_code` (UUID v4) generated per session.
 
+### Abuse Protection, Rate Limiting & Reverse Proxy Attribution
+All REST endpoints are protected with sliding-window rate limiting configured via environment variables:
+- **Global Rate Limiting:** Applied to all incoming requests per client IP (`RATE_LIMIT_GLOBAL_MAX`, default: 300 requests / 15m).
+- **Registration Rate Limiting:** Limits new account creation per client IP (`RATE_LIMIT_REGISTER_MAX`, default: 10 / 15m).
+- **Login Rate Limiting (Dual-Layer):**
+  - Per IP: Protects against credential spraying (`RATE_LIMIT_LOGIN_MAX`, default: 10 / 15m).
+  - Per Account (Email): Protects against credential stuffing across distributed IPs (`RATE_LIMIT_LOGIN_ACCOUNT_MAX`, default: 5 / 15m).
+- **OTP Request Rate Limiting (Dual-Layer):**
+  - Per IP: Prevents mass SMS flood attacks (`RATE_LIMIT_OTP_REQUEST_MAX`, default: 5 / 15m).
+  - Per Phone: Prevents targeted SMS harassment and bill inflation (`RATE_LIMIT_OTP_REQUEST_PHONE_MAX`, default: 3 / 15m).
+- **OTP Verification Rate Limiting (Dual-Layer):**
+  - Per IP: Prevents brute-force attempts from a single host (`RATE_LIMIT_OTP_VERIFY_MAX`, default: 10 / 15m).
+  - Per Phone: Enforces maximum guess attempts per OTP code (`RATE_LIMIT_OTP_VERIFY_PHONE_MAX`, default: 5 / 15m).
+- **Reverse Proxy Support (Nginx / ALB):** Express is configured with `trust proxy` (`TRUST_PROXY`, default: `'1'`), correctly reading the real client IP from `X-Forwarded-For` so rate limits are evaluated per individual user rather than proxy egress IP.
+- **Rate Limit Exceeded Response (`429 Too Many Requests`):**
+```json
+{
+  "statusCode": 429,
+  "error": "TooManyRequests",
+  "message": "Too many failed login attempts for this account, please try again later"
+}
+```
+
 ---
 
 ## 2. Authentication Endpoints (`/auth`)
@@ -378,6 +401,50 @@ Files an abuse report for a call session. The server links the report to the opp
   - `404 Not Found`: Call session not found or user was not a participant.
   - `409 Conflict`: A report for this call has already been filed by this user.
 
+*Auto-Moderation Rule:* When a user receives reports from several distinct users (threshold configured in `app_settings` under key `'moderation'`, default: 3), the server marks the account as `is_flagged = true` for administrator review. The server does not auto-ban or auto-suspend.
+
+---
+
+### 3.5 Delete Account (Google Play Compliance)
+Permanently deletes the authenticated user's account and removes all personal data and identifying credentials in compliance with Google Play Data Safety policies. Associated records are permanently anonymized.
+
+- **Method:** `DELETE`
+- **Path:** `/user/account` (alias: `/user/me`)
+- **Auth Required:** Bearer JWT User
+- **Request Body:** None
+- **De-identification & Erasure Details:**
+  1. Active call sessions are terminated immediately (`end_reason = 'account_deleted'`).
+  2. Active socket connection is notified (`auth:deleted`) and terminated.
+  3. `users` table: `email`, `phone`, `password_hash`, `push_token` are set to `NULL`, `is_available` to `FALSE`, `status` to `'deleted'`, and `deleted_at` to `CURRENT_TIMESTAMP`.
+  4. `refresh_tokens`: All active tokens for the user are deleted.
+  5. `blocks`: All block relationships involving the user are removed.
+  6. `call_sessions`: Foreign keys (`caller_id`, `callee_id`) are unlinked and set to `NULL`, preserving anonymous aggregate billing and duration statistics.
+  7. `reports`: Foreign keys (`reporter_id`, `reported_id`) are unlinked and set to `NULL`.
+  8. `wallets`: Associated wallet is permanently locked (`is_locked = TRUE`).
+- **Response Body (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "Your account and personal data have been permanently deleted."
+}
+```
+- **Error Codes:**
+  - `401 Unauthorized`: Missing or invalid access token.
+
+---
+
+### 3.6 Data Retention & Cleanup Settings (`app_settings`)
+System-level data retention and automated cleanup parameters are stored under key `'retention'` in `app_settings`:
+- `call_history_retention_days` (default: `90`): Number of days after which ended `call_sessions` are automatically purged by the background cleanup job. Set to `0` to disable auto-purging.
+- `availability_grace_period_minutes` (default: `60`): Number of minutes after which users with no active socket connection have `is_available` reset to `false`.
+
+```json
+{
+  "call_history_retention_days": 90,
+  "availability_grace_period_minutes": 60
+}
+```
+
 ---
 
 ## 4. Calls Endpoints (`/calls`)
@@ -596,7 +663,42 @@ Authenticates an administrator with email, password, and optional TOTP MFA code.
 ```
 - **Error Codes:**
   - `400 Bad Request`: Missing credentials.
-  - `401 Unauthorized`: Invalid credentials or invalid TOTP code.
+  - `401 Unauthorized`: Invalid credentials.
+  - `423 Locked`: Admin account temporarily locked due to repeated failed login attempts (`ADMIN_MAX_LOGIN_ATTEMPTS` exceeded; locked for `ADMIN_LOCKOUT_MINUTES`). Response includes `retryAfterMinutes`.
+
+---
+
+### 6.1b Change Admin Password
+Updates the authenticated administrator's password, strictly enforcing the platform Strong Admin Password Policy.
+
+- **Method:** `PATCH`
+- **Path:** `/admin/auth/password`
+- **Auth Required:** Bearer JWT Admin (`superadmin` or `admin`)
+- **Password Policy Requirements:**
+  - Minimum 12 characters
+  - At least one uppercase letter (`[A-Z]`)
+  - At least one lowercase letter (`[a-z]`)
+  - At least one numeric digit (`[0-9]`)
+  - At least one special symbol (`[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]`)
+  - Cannot be identical to the current password
+- **Request Body:**
+```json
+{
+  "current_password": "CurrentAdminPassword123!",
+  "new_password": "NewStrongAdminPassword456!"
+}
+```
+- **Response Body (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "Admin password updated successfully"
+}
+```
+- **Error Codes:**
+  - `400 Bad Request`: Password does not meet strong policy requirements or is identical to current password.
+  - `401 Unauthorized`: Missing or invalid admin token, or incorrect `current_password`.
+  - `403 Forbidden`: Attempted with a non-admin user token.
 
 ---
 
@@ -1120,5 +1222,37 @@ All client-emitted events require an authenticated socket connection (`auth: { t
   "reason": "caller_hangup"
 }
 ```
-*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`, `'caller_left'`, `'declined'`, `'blocked'`, `'ended'`.
+*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`, `'caller_left'`, `'declined'`, `'blocked'`, `'ended'`, `'superseded'`.
 - **Description:** Closes session, cleans up peer connection, and presents the Report/Block prompt on the client.
+
+---
+
+### 7.4 Socket Abuse Protection & Session Control
+
+#### `auth:superseded`
+- **Direction:** Server $\rightarrow$ Old Socket Client
+- **Payload:**
+```json
+{
+  "message": "Signed in from another device. This session has been disconnected."
+}
+```
+- **Description:** Fired when a user establishes a new socket connection with the same user ID. The platform enforces a **single active socket session** per calling account: the newest connection takes over immediately, terminates any active call with `reason: 'superseded'`, alerts the old client, and disconnects the old socket.
+
+#### `call:error`
+- **Direction:** Server $\rightarrow$ Client
+- **Payload:**
+```json
+{
+  "error": "rate_limit_exceeded",
+  "message": "Too many call search requests. Please wait a moment before searching again.",
+  "retryAfterSeconds": 30
+}
+```
+*Possible `error` codes:*
+- `'rate_limit_exceeded'`: Emitted when per-user socket event rate limits are exceeded (`call:find`, `call:accept`, or WebRTC signaling).
+- `'cooldown_active'`: Emitted when the user is placed on temporary cooldown after rapidly skipping or cancelling calls (`SOCKET_SKIP_CANCEL_THRESHOLD` reached). Includes `retryAfterSeconds`.
+- `'payload_too_large'`: Emitted when signaling payload exceeds `SOCKET_MAX_PAYLOAD_BYTES` (default: 64 KB).
+- `'invalid_payload'`: Emitted when non-object or malformed payloads are sent. Repeated malformed events beyond `SOCKET_MAX_MALFORMED_EVENTS` cause immediate connection termination.
+- `'unauthorized_relay'`: Emitted when attempting to relay signaling messages for a session the user is not a participant in.
+- `'unauthorized'`: User is not permitted to perform the action.

@@ -1,6 +1,8 @@
 import bcrypt from 'bcrypt';
+import crypto from 'node:crypto';
 import { z } from 'zod';
 import { pool } from '../db/index.js';
+import { config } from '../config/index.js';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -94,8 +96,8 @@ export async function register(req, res, next) {
       });
     }
 
-    // Hash password with bcrypt (10 rounds)
-    const saltRounds = 10;
+    // Hash password with bcrypt (12 rounds - OWASP recommended)
+    const saltRounds = 12;
     const passwordHash = await bcrypt.hash(password, saltRounds);
 
     const client = await pool.connect();
@@ -281,8 +283,26 @@ export async function requestOtp(req, res, next) {
 
     const { phone } = validated.data;
 
-    // 3. Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // 3. Rate limiting / Cooldown: check for recent OTP request for this phone within 60 seconds
+    const recentOtp = await pool.query(
+      `
+      SELECT id FROM otp_codes 
+      WHERE target = $1 AND purpose = 'login' AND created_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds' 
+      LIMIT 1;
+      `,
+      [phone]
+    );
+
+    if (recentOtp.rows.length > 0) {
+      return res.status(429).json({
+        statusCode: 429,
+        error: 'TooManyRequests',
+        message: 'Please wait 60 seconds before requesting another code',
+      });
+    }
+
+    // 4. Generate 6-digit OTP using cryptographically secure PRNG
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const codeHash = hashToken(otp);
 
     // Invalidate previous active OTPs for this phone
@@ -304,11 +324,13 @@ export async function requestOtp(req, res, next) {
       [phone, codeHash]
     );
 
-    // 4. In development: print OTP to the server console instead of sending SMS
-    logger.info('===============================================================');
-    logger.info(`[DEV CONSOLE] Mobile Login OTP for ${phone}: [ ${otp} ]`);
-    logger.info('Expires in 5 minutes (300 seconds). Do not share this code.');
-    logger.info('===============================================================');
+    // 5. In development/staging environments: print OTP to the server console instead of sending SMS
+    if (config.env !== 'production') {
+      logger.info('===============================================================');
+      logger.info(`[DEV CONSOLE] Mobile Login OTP for ${phone}: [ ${otp} ]`);
+      logger.info('Expires in 5 minutes (300 seconds). Do not share this code.');
+      logger.info('===============================================================');
+    }
 
     return res.status(200).json({
       message: 'OTP sent successfully',
@@ -609,8 +631,8 @@ export async function logout(req, res, next) {
     if (refreshToken) {
       const tokenHash = hashToken(refreshToken);
       await pool.query(
-        'UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = $1',
-        [tokenHash]
+        'UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = $1 AND user_id = $2',
+        [tokenHash, req.user.id]
       );
     } else if (req.user?.id) {
       // If no specific refresh token provided, revoke all active refresh tokens for user

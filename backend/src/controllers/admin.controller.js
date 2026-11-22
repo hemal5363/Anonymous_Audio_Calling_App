@@ -1,14 +1,32 @@
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
 import { pool } from '../db/index.js';
+import { config } from '../config/index.js';
 import { generateAdminToken } from '../utils/token.js';
 import { logger } from '../utils/logger.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
+import { callSessionManager } from '../socket/callSessionManager.js';
+import { getIO, SOCKET_EVENTS } from '../socket/index.js';
+import { endCall } from '../services/call.service.js';
 
 // Schemas
 const adminLoginSchema = z.object({
   email: z.string().email('Invalid email address format').toLowerCase().trim(),
   password: z.string().min(1, 'Password is required'),
+});
+
+// Strong admin password validation regex: min 12 chars, uppercase, lowercase, digit, special char
+const strongAdminPasswordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]).{12,}$/;
+
+const changeAdminPasswordSchema = z.object({
+  current_password: z.string().min(1, 'Current password is required'),
+  new_password: z
+    .string()
+    .min(12, 'Admin password must be at least 12 characters long')
+    .regex(
+      strongAdminPasswordRegex,
+      'Password must contain at least one uppercase letter, one lowercase letter, one digit, and one special character'
+    ),
 });
 
 const updateSettingSchema = z.object({
@@ -18,10 +36,29 @@ const updateSettingSchema = z.object({
 });
 
 const updateUserStatusSchema = z.object({
-  status: z.enum(['active', 'suspended', 'banned'], {
-    errorMap: () => ({ message: "Status must be 'active', 'suspended', or 'banned'" }),
+  status: z.enum(['active', 'suspended', 'banned', 'flagged'], {
+    errorMap: () => ({ message: "Status must be 'active', 'suspended', 'banned', or 'flagged'" }),
   }),
   reason: z.string().optional(),
+});
+
+const listUsersQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().max(100).optional(),
+  status: z.enum(['active', 'suspended', 'banned', 'flagged']).optional(),
+});
+
+const listReportsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  status: z.enum(['pending', 'reviewed', 'resolved', 'dismissed']).optional(),
+});
+
+const listCallLogsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  status: z.enum(['ringing', 'connected', 'ended', 'missed', 'declined']).optional(),
 });
 
 const resolveReportSchema = z.object({
@@ -54,7 +91,7 @@ export async function adminLogin(req, res, next) {
     // Look up administrator by email
     const { rows } = await pool.query(
       `
-      SELECT id, email, password_hash, role, is_active
+      SELECT id, email, password_hash, role, is_active, failed_login_attempts, locked_until
       FROM admin_users
       WHERE email = $1;
       `,
@@ -71,6 +108,17 @@ export async function adminLogin(req, res, next) {
 
     const admin = rows[0];
 
+    // Check if account is locked due to repeated failed attempts
+    if (admin.locked_until && new Date(admin.locked_until) > new Date()) {
+      const minutesRemaining = Math.max(1, Math.ceil((new Date(admin.locked_until) - Date.now()) / (60 * 1000)));
+      return res.status(423).json({
+        statusCode: 423,
+        error: 'Locked',
+        message: `Admin account is temporarily locked due to repeated failed login attempts. Please try again in ${minutesRemaining} minute(s).`,
+        retryAfterMinutes: minutesRemaining,
+      });
+    }
+
     if (!admin.is_active) {
       return res.status(403).json({
         statusCode: 403,
@@ -82,16 +130,51 @@ export async function adminLogin(req, res, next) {
     // Compare password with bcrypt
     const isMatch = await bcrypt.compare(password, admin.password_hash);
     if (!isMatch) {
+      const maxAttempts = config.adminSecurity.maxLoginAttempts;
+      const lockoutMinutes = config.adminSecurity.lockoutMinutes;
+      const currentAttempts = (admin.failed_login_attempts || 0) + 1;
+      const isLockedNow = currentAttempts >= maxAttempts;
+
+      try {
+        await pool.query(
+          `UPDATE admin_users 
+           SET failed_login_attempts = $1,
+               locked_until = CASE WHEN $2 = TRUE THEN CURRENT_TIMESTAMP + ($3 || ' minutes')::INTERVAL ELSE NULL END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $4;`,
+          [currentAttempts, isLockedNow, lockoutMinutes, admin.id]
+        );
+      } catch (dbErr) {
+        logger.warn('Failed to persist admin login attempt count in DB:', dbErr.message);
+      }
+
+      if (isLockedNow) {
+        logger.warn(`Admin account ${admin.email} locked out after ${currentAttempts} failed attempts for ${lockoutMinutes} minutes.`);
+        return res.status(423).json({
+          statusCode: 423,
+          error: 'Locked',
+          message: `Admin account has been temporarily locked after ${maxAttempts} failed login attempts. Try again in ${lockoutMinutes} minutes.`,
+          retryAfterMinutes: lockoutMinutes,
+        });
+      }
+
+      const remainingAttempts = Math.max(0, maxAttempts - currentAttempts);
       return res.status(401).json({
         statusCode: 401,
         error: 'Unauthorized',
-        message: 'Invalid admin credentials',
+        message: `Invalid admin credentials. ${remainingAttempts} attempt(s) remaining before account lockout.`,
+        remainingAttempts,
       });
     }
 
-    // Update last_login_at
+    // Successful login: update last_login_at and reset failed_login_attempts / locked_until
     await pool.query(
-      'UPDATE admin_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1',
+      `UPDATE admin_users 
+       SET last_login_at = CURRENT_TIMESTAMP, 
+           failed_login_attempts = 0, 
+           locked_until = NULL, 
+           updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $1`,
       [admin.id]
     );
 
@@ -105,6 +188,75 @@ export async function adminLogin(req, res, next) {
         role: admin.role,
       },
       token,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 6.1b Change Admin Password
+ * PATCH /admin/auth/password
+ * Strictly enforces strong password policy: >= 12 chars, uppercase, lowercase, number, special char
+ */
+export async function changeAdminPassword(req, res, next) {
+  try {
+    const validated = changeAdminPasswordSchema.safeParse(req.body);
+    if (!validated.success) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: validated.error.errors.map((e) => e.message).join(', '),
+      });
+    }
+
+    const { current_password, new_password } = validated.data;
+    const adminId = req.admin.id;
+
+    const { rows } = await pool.query(
+      'SELECT id, password_hash FROM admin_users WHERE id = $1;',
+      [adminId]
+    );
+
+    if (rows.length === 0 || !rows[0].password_hash) {
+      return res.status(404).json({
+        statusCode: 404,
+        error: 'NotFound',
+        message: 'Admin account not found',
+      });
+    }
+
+    const admin = rows[0];
+    const isMatch = await bcrypt.compare(current_password, admin.password_hash);
+    if (!isMatch) {
+      return res.status(401).json({
+        statusCode: 401,
+        error: 'Unauthorized',
+        message: 'Current password does not match records',
+      });
+    }
+
+    if (current_password === new_password) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: 'New password cannot be identical to the current password',
+      });
+    }
+
+    const saltRounds = 12;
+    const newHash = await bcrypt.hash(new_password, saltRounds);
+
+    await pool.query(
+      'UPDATE admin_users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;',
+      [newHash, adminId]
+    );
+
+    logger.info(`Admin [${adminId}] password successfully updated according to strong password policy.`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Admin password updated successfully',
     });
   } catch (error) {
     next(error);
@@ -185,11 +337,18 @@ export async function updateSetting(req, res, next) {
  */
 export async function listUsers(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const validated = listUsersQuerySchema.safeParse(req.query);
+    if (!validated.success) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: validated.error.errors.map((e) => e.message).join(', '),
+      });
+    }
+
+    const { page, limit, search, status } = validated.data;
     const offset = (page - 1) * limit;
-    const search = req.query.search ? `%${req.query.search.trim().toLowerCase()}%` : null;
-    const status = req.query.status || null;
+    const searchPattern = search ? `%${search.trim().toLowerCase()}%` : null;
 
     let queryText = `
       SELECT 
@@ -197,6 +356,7 @@ export async function listUsers(req, res, next) {
         u.email,
         u.phone,
         u.status,
+        u.is_flagged,
         u.is_available,
         COALESCE(w.balance_amount, 0.00)::text as wallet_balance,
         (SELECT COUNT(*) FROM reports r WHERE r.reported_id = u.id)::int as reports_count,
@@ -208,25 +368,37 @@ export async function listUsers(req, res, next) {
 
     const params = [];
 
-    if (search) {
-      params.push(search);
+    if (searchPattern) {
+      params.push(searchPattern);
       queryText += ` AND (LOWER(u.email) LIKE $${params.length} OR u.phone LIKE $${params.length})`;
     }
 
     if (status) {
-      params.push(status);
-      queryText += ` AND u.status = $${params.length}`;
+      if (status === 'flagged') {
+        queryText += ` AND (u.status = 'flagged' OR u.is_flagged = TRUE)`;
+      } else {
+        params.push(status);
+        queryText += ` AND u.status = $${params.length}`;
+      }
     }
 
     // Count query
     const countParams = [...params];
-    const countText = `
+    let countText = `
       SELECT COUNT(*) as total
       FROM users u
       WHERE 1=1
-      ${search ? ` AND (LOWER(u.email) LIKE $1 OR u.phone LIKE $1)` : ''}
-      ${status ? ` AND u.status = $${search ? 2 : 1}` : ''}
     `;
+    if (searchPattern) {
+      countText += ` AND (LOWER(u.email) LIKE $1 OR u.phone LIKE $1)`;
+    }
+    if (status) {
+      if (status === 'flagged') {
+        countText += ` AND (u.status = 'flagged' OR u.is_flagged = TRUE)`;
+      } else {
+        countText += ` AND u.status = $${searchPattern ? 2 : 1}`;
+      }
+    }
 
     params.push(limit);
     params.push(offset);
@@ -275,9 +447,11 @@ export async function updateUserStatus(req, res, next) {
     const result = await pool.query(
       `
       UPDATE users
-      SET status = $1, updated_at = CURRENT_TIMESTAMP
+      SET status = $1, 
+          is_flagged = CASE WHEN $1 = 'active' THEN FALSE ELSE is_flagged END,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = $2
-      RETURNING id, status;
+      RETURNING id, status, is_flagged;
       `,
       [status, userId]
     );
@@ -288,6 +462,49 @@ export async function updateUserStatus(req, res, next) {
         error: 'NotFound',
         message: 'User not found',
       });
+    }
+
+    // Real-time security enforcement if user was banned or suspended
+    if (status === 'banned' || status === 'suspended') {
+      // 1. Immediately revoke all active refresh tokens for this user
+      await pool.query(
+        'UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND revoked_at IS NULL;',
+        [userId]
+      );
+
+      // 2. Terminate active call session if user is in one
+      const activeSession = callSessionManager.getSessionByUserId(userId);
+      if (activeSession) {
+        const callCode = activeSession.callCode;
+        await endCall({ callCode, userId, reason: 'user_banned' });
+        try {
+          const io = getIO();
+          io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
+            callCode,
+            sessionId: activeSession.sessionId,
+            durationSeconds: activeSession.connectedAt ? Math.round((Date.now() - activeSession.connectedAt) / 1000) : 0,
+            reason: 'user_banned',
+          });
+        } catch (e) {
+          // Socket server might not be initialized in isolated unit tests
+        }
+      }
+
+      // 3. Forcibly disconnect user's active socket connection
+      const socketId = userSocketMap.getSocketId(userId);
+      if (socketId) {
+        try {
+          const io = getIO();
+          const userSocket = io.sockets.sockets.get(socketId);
+          if (userSocket) {
+            userSocket.emit('auth:revoked', { message: 'Your account has been banned or suspended.' });
+            userSocket.disconnect(true);
+          }
+        } catch (e) {
+          // Socket server might not be initialized in isolated unit tests
+        }
+        userSocketMap.delete(userId);
+      }
     }
 
     logger.info(`Admin [${req.admin.id}] changed user [${userId}] status to '${status}' [Reason: ${reason || 'N/A'}]`);
@@ -308,10 +525,17 @@ export async function updateUserStatus(req, res, next) {
  */
 export async function listReports(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const validated = listReportsQuerySchema.safeParse(req.query);
+    if (!validated.success) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: validated.error.errors.map((e) => e.message).join(', '),
+      });
+    }
+
+    const { page, limit, status } = validated.data;
     const offset = (page - 1) * limit;
-    const status = req.query.status || null;
 
     let queryText = `
       SELECT 
@@ -505,10 +729,17 @@ export async function getStats(req, res, next) {
  */
 export async function listCallLogs(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const validated = listCallLogsQuerySchema.safeParse(req.query);
+    if (!validated.success) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: validated.error.errors.map((e) => e.message).join(', '),
+      });
+    }
+
+    const { page, limit, status } = validated.data;
     const offset = (page - 1) * limit;
-    const status = req.query.status || null;
 
     let queryText = `
       SELECT 

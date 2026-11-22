@@ -3,3 +3,14 @@ node_modules/
 *.log
 .expo/
 .DS_Store
+
+# Credentials, secrets and keys
+secrets/
+*.pem
+*.key
+*.jks
+*.p12
+*.p8
+*.mobileprovision
+google-services.json
+*-firebase-adminsdk-*.json

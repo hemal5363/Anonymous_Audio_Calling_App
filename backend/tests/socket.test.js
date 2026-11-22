@@ -254,4 +254,64 @@ describe('Socket.IO Gateway & Authentication', () => {
       });
     });
   });
+
+  describe('SEC-10: Socket Event Payload Validation', () => {
+    let client;
+    const token = generateAccessToken(mockActiveUser);
+
+    beforeEach((done) => {
+      querySpy.mockResolvedValue({ rows: [mockActiveUser] });
+      client = ioClient(`http://127.0.0.1:${port}`, {
+        transports: ['websocket'],
+        reconnection: false,
+        auth: { token },
+      });
+      client.on('connect', done);
+      client.on('connect_error', done);
+    });
+
+    afterEach(() => {
+      if (client && client.connected) {
+        client.disconnect();
+      }
+    });
+
+    it('should reject signal:offer when payload is not an object or callCode is missing', (done) => {
+      client.on(SOCKET_EVENTS.CALL_ERROR, (err) => {
+        expect(['invalid_payload', 'missing_call_code']).toContain(err.error);
+        done();
+      });
+
+      // Send invalid non-object payload
+      client.emit(SOCKET_EVENTS.SIGNAL_OFFER, 'not-an-object');
+    });
+
+    it('should reject call:session:state with invalid_payload if payload is not an object', (done) => {
+      client.emit('call:session:state', 'invalid_payload_string', (res) => {
+        expect(res.error).toBe('invalid_payload');
+        done();
+      });
+    });
+
+    it('should reject call:session:state with sessionId_required if sessionId is missing or invalid', (done) => {
+      client.emit('call:session:state', { sessionId: '' }, (res) => {
+        expect(res.error).toBe('sessionId_required');
+        done();
+      });
+    });
+
+    it('should reject call:accept with missing_call_code if callCode is missing or invalid', (done) => {
+      client.emit(SOCKET_EVENTS.CALL_ACCEPT, { callCode: '' }, (res) => {
+        expect(res.error).toBe('missing_call_code');
+        done();
+      });
+    });
+
+    it('should reject call:end with missing_call_code if callCode is missing or invalid', (done) => {
+      client.emit(SOCKET_EVENTS.CALL_END, { callCode: '' }, (res) => {
+        expect(res.error).toBe('missing_call_code');
+        done();
+      });
+    });
+  });
 });

@@ -14,12 +14,15 @@ async function runSeed() {
 
     // 1. Read Admin credentials from .env
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
+    if (process.env.NODE_ENV === 'production' && !process.env.ADMIN_PASSWORD) {
+      throw new Error('ADMIN_PASSWORD must be explicitly set in environment variables when seeding in production');
+    }
     const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
 
     logger.info(`Seeding admin user for email: ${adminEmail}`);
 
-    // Hash the password with bcrypt (10 rounds)
-    const saltRounds = 10;
+    // Hash the password with bcrypt (12 rounds - OWASP recommended)
+    const saltRounds = 12;
     const passwordHash = await bcrypt.hash(adminPassword, saltRounds);
 
     const { rows: adminRows } = await client.query(

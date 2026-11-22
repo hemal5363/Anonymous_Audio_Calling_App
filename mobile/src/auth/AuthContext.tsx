@@ -22,6 +22,7 @@ interface AuthState {
   requestOtp: (phone: string) => Promise<{ message: string; expires_in_seconds: number }>;
   verifyOtp: (phone: string, otp: string) => Promise<void>;
   logout: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
   updateUser: (user: Partial<User>) => void;
   refreshUser: () => Promise<void>;
 }
@@ -133,6 +134,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const deleteAccount = async () => {
+    try {
+      await unregisterPushToken().catch(() => {});
+      await api.delete('/user/account');
+    } finally {
+      await tokenStorage.clearTokens();
+      disconnectSocket();
+      setUser(null);
+    }
+  };
+
   const updateUser = (partial: Partial<User>) => {
     setUser((prev) => (prev ? { ...prev, ...partial } : null));
   };
@@ -159,6 +171,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requestOtp,
         verifyOtp,
         logout,
+        deleteAccount,
         updateUser,
         refreshUser,
       }}

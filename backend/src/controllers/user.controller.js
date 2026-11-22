@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
+import { userSocketMap } from '../socket/userSocketMap.js';
 
 // Validation Schemas
 const availabilitySchema = z.object({
@@ -72,6 +73,50 @@ export async function toggleAvailability(req, res, next) {
     );
 
     logger.info(`User availability updated: [ID: ${userId}, Available: ${is_available}]`);
+
+    // Edge Case (docs/CALL_FLOW.md 9.3): Callee switches is_available to FALSE mid-match while ringing
+    if (!is_available) {
+      const pendingSession = callSessionManager.getSessionByUserId(userId);
+      if (
+        pendingSession &&
+        pendingSession.calleeId === userId &&
+        pendingSession.status === 'ringing'
+      ) {
+        logger.info(
+          `Callee turned off availability during ringing [CallCode: ${pendingSession.callCode}]. Cancelling ringing session...`
+        );
+        callSessionManager.clearRingingTimer(pendingSession);
+        callSessionManager.endSession(pendingSession.callCode);
+
+        try {
+          await pool.query(
+            `UPDATE call_sessions
+             SET status = 'ended', end_reason = 'callee_hangup', ended_at = CURRENT_TIMESTAMP
+             WHERE call_code = $1;`,
+            [pendingSession.callCode]
+          );
+
+          const { getIO } = await import('../socket/index.js');
+          const io = getIO();
+          io.to(`call:${pendingSession.callCode}`).emit('call:ended', {
+            callCode: pendingSession.callCode,
+            sessionId: pendingSession.sessionId,
+            durationSeconds: 0,
+            reason: 'callee_hangup',
+          });
+
+          const callerSocketId = userSocketMap.getSocketId(pendingSession.callerId);
+          if (callerSocketId) {
+            io.to(callerSocketId).emit('call:none-available', {
+              error: 'no_users_available',
+              message: 'Partner became unavailable.',
+            });
+          }
+        } catch {
+          // Socket.IO may not be active in standalone tests
+        }
+      }
+    }
 
     return res.status(200).json({
       is_available: rows[0].is_available,
@@ -380,24 +425,31 @@ export async function reportUser(req, res, next) {
     const report = reportRows[0];
     logger.info(`Abuse report filed for call ${call_code} by user ${userId} [Reason: ${reason}]`);
 
-    // 4. Automated Safety Rule: Check if reported user exceeded threshold in past 24 hours
+    // 4. Auto-Moderation: Check if reported user received reports from several different users
     try {
+      let threshold = 3;
+      const settingsRes = await pool.query("SELECT value_json FROM app_settings WHERE key = 'moderation';");
+      if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.flag_report_threshold) {
+        threshold = Number(settingsRes.rows[0].value_json.flag_report_threshold);
+      }
+
       const { rows: reportCountRows } = await pool.query(
         `
-        SELECT COUNT(*) as count
+        SELECT COUNT(DISTINCT reporter_id) as count
         FROM reports
-        WHERE reported_id = $1 AND created_at > (CURRENT_TIMESTAMP - INTERVAL '24 hours');
+        WHERE reported_id = $1 AND status != 'dismissed';
         `,
         [reportedId]
       );
 
-      const recentReports = parseInt(reportCountRows[0].count, 10);
-      if (recentReports >= 3) {
+      const distinctReports = parseInt(reportCountRows[0].count, 10);
+      if (distinctReports >= threshold) {
+        // Mark as flagged for admin review without auto-banning
         await pool.query(
-          `UPDATE users SET status = 'suspended', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+          `UPDATE users SET is_flagged = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
           [reportedId]
         );
-        logger.warn(`User ${reportedId} automatically suspended due to ${recentReports} reports in 24 hours.`);
+        logger.warn(`User ${reportedId} marked as flagged for admin review: received reports from ${distinctReports} distinct users (threshold: ${threshold}).`);
       }
     } catch (err) {
       logger.error('Error checking automated moderation threshold:', err.message);
@@ -531,6 +583,148 @@ export async function getSessionById(req, res, next) {
     // Return only the status field
     return res.status(200).json({
       status: normalizedStatus,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 3.5 Delete Account (Google Play Compliance)
+ * DELETE /user/account or DELETE /user/me
+ * Permanently removes user credentials and personal identifiers (email, phone, password_hash, push_token),
+ * revokes all tokens, removes blocks, locks wallet, and anonymizes associated call sessions and reports.
+ */
+export async function deleteAccount(req, res, next) {
+  try {
+    const userId = req.user.id;
+
+    // 1. Terminate any active call session for this user in memory
+    const activeSession = callSessionManager.getSessionByUserId(userId);
+    if (activeSession) {
+      try {
+        callSessionManager.clearRingingTimer(activeSession);
+        callSessionManager.endSession(activeSession.callCode);
+        await pool.query(
+          `UPDATE call_sessions
+           SET status = 'ended', end_reason = 'cancelled', ended_at = CURRENT_TIMESTAMP
+           WHERE call_code = $1;`,
+          [activeSession.callCode]
+        );
+
+        try {
+          const { getIO } = await import('../socket/index.js');
+          const io = getIO();
+          io.to(`call:${activeSession.callCode}`).emit('call:ended', {
+            callCode: activeSession.callCode,
+            durationSeconds: 0,
+            reason: 'account_deleted',
+          });
+          const peerUserId =
+            activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+          const peerSocketId = userSocketMap.getSocketId(peerUserId);
+          if (peerSocketId) {
+            io.to(peerSocketId).emit('call:ended', {
+              callCode: activeSession.callCode,
+              durationSeconds: 0,
+              reason: 'account_deleted',
+            });
+          }
+        } catch {
+          // Socket.IO may not be active during standalone test calls
+        }
+      } catch (err) {
+        logger.error('Error ending active call on account deletion:', err.message);
+      }
+    }
+
+    // 2. Disconnect user's active socket session
+    const socketId = userSocketMap.getSocketId(userId);
+    if (socketId) {
+      try {
+        const { getIO } = await import('../socket/index.js');
+        const io = getIO();
+        const sock = io.sockets.sockets.get(socketId);
+        if (sock) {
+          sock.emit('auth:deleted', {
+            message: 'Your account has been deleted.',
+          });
+          sock.disconnect(true);
+        }
+      } catch {
+        // Socket.IO may not be active
+      }
+      userSocketMap.removeByUserId(userId);
+    }
+
+    // 3. Database transaction for complete data erasure & anonymization
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Erase all personal information and credentials
+      await client.query(
+        `UPDATE users
+         SET email = NULL,
+             phone = NULL,
+             password_hash = NULL,
+             push_token = NULL,
+             is_available = FALSE,
+             status = 'deleted',
+             deleted_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1;`,
+        [userId]
+      );
+
+      // Revoke all refresh tokens
+      await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1;`, [userId]);
+
+      // Remove bidirectional block relationships
+      await client.query(
+        `DELETE FROM blocks WHERE blocker_id = $1 OR blocked_id = $1;`,
+        [userId]
+      );
+
+      // Anonymize call sessions by nullifying foreign keys
+      await client.query(
+        `UPDATE call_sessions SET caller_id = NULL WHERE caller_id = $1;`,
+        [userId]
+      );
+      await client.query(
+        `UPDATE call_sessions SET callee_id = NULL WHERE callee_id = $1;`,
+        [userId]
+      );
+
+      // Anonymize reports by nullifying reporter and reported foreign keys
+      await client.query(
+        `UPDATE reports SET reporter_id = NULL WHERE reporter_id = $1;`,
+        [userId]
+      );
+      await client.query(
+        `UPDATE reports SET reported_id = NULL WHERE reported_id = $1;`,
+        [userId]
+      );
+
+      // Lock wallet if present
+      await client.query(
+        `UPDATE wallets SET is_locked = TRUE, updated_at = CURRENT_TIMESTAMP WHERE user_id = $1;`,
+        [userId]
+      );
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    logger.info(`User account deleted and personal data completely sanitized [ID: ${userId}]`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Your account and personal data have been permanently deleted.',
     });
   } catch (error) {
     next(error);

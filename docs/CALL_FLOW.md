@@ -291,7 +291,29 @@ Coturn uses the standard **Time-Limited Long-Term Credential Mechanism** (`lt-cr
 - **Report (`POST /user/reports`):**
   - Sends `{ call_code, reason, note }`.
   - Creates a `reports` row against the opposite participant.
-  - If a user reaches the auto-suspension threshold (default: 3 reports in 24 hours), the server automatically suspends their account for 48 hours.
+  - **Auto-Moderation (Report-Based Flagging):** If a user receives reports from several different users (threshold configured in `app_settings` under key `'moderation'`, default: 3 distinct reporters), the server automatically marks them as `is_flagged = TRUE` for administrator investigation. The server does **NOT** auto-ban or auto-suspend the account, preserving due process for human admin review.
+
+### 7.5 Abuse Protection & Session Management
+
+#### 7.5.1 Single Active Calling Session (Device Takeover)
+- A user can only maintain **one** active socket session for calling at any given time.
+- **Takeover Policy (Safer Design Choice):** When a user logs in or connects on a second device while already connected:
+  1. The new connection supersedes the previous socket session.
+  2. The server emits an `auth:superseded` event to the older socket (`{ message: "Signed in from another device. This session has been disconnected." }`).
+  3. Any ongoing call session on the older device is cleanly ended with `reason: 'superseded'`, notifying the other peer with `call:ended`.
+  4. The older socket is forcibly disconnected.
+  *Rationale:* Rejecting the new connection can permanently lock users out if their prior device crashed, lost network connectivity, or abruptly terminated before TCP teardown. Takeover clears zombie connections cleanly and guarantees users always reach the platform on their current device.
+
+#### 7.5.2 Skip & Cancel Cooldown (Anti-Ringing Spam)
+- Rapidly cycling through calls via `call:skip` or cancelling calls during ringing spams prospective callees with unwanted rings.
+- The server tracks skip and cancel events within a sliding window (`SOCKET_SKIP_CANCEL_WINDOW_MS`, default: 60s).
+- If the event count reaches `SOCKET_SKIP_CANCEL_THRESHOLD` (default: 5), the caller is placed on cooldown for `SOCKET_SKIP_CANCEL_COOLDOWN_MS` (default: 30s).
+- During cooldown, any call search request (`call:find` or `call:request`) is rejected with `call:error` (`error: 'cooldown_active'`, including `retryAfterSeconds`).
+
+#### 7.5.3 Real-Time Signaling Rate Limits & Malformed Event Policy
+- **Rate Limits:** Per-user sliding-window limits are enforced on `call:find` (default: 10/min), `call:accept` / `call:decline` (default: 15/min), and WebRTC signaling messages (`webrtc:offer`, `webrtc:answer`, `webrtc:ice-candidate`, default: 60/min). Exceeding limits returns `call:error` (`error: 'rate_limit_exceeded'`).
+- **Payload Size Cap:** Payloads exceeding `SOCKET_MAX_PAYLOAD_BYTES` (default: 64 KB) are rejected with `call:error` (`error: 'payload_too_large'`).
+- **Malformed Event Policy:** Non-object, missing-callCode, or oversized payloads increment a per-socket violation counter. Upon exceeding `SOCKET_MAX_MALFORMED_EVENTS` (default: 5), the offending socket is immediately dropped.
 
 ---
 

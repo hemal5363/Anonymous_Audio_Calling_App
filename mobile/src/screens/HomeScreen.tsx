@@ -243,7 +243,15 @@ export default function HomeScreen() {
               onPress={() => navigation.navigate('Wallet')}
               activeOpacity={0.7}
             >
-              <Text style={styles.walletHeaderButtonText}>💳 Wallet</Text>
+              <Text style={styles.walletHeaderButtonText}>💳</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.settingsHeaderButton}
+              onPress={() => navigation.navigate('Settings')}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.settingsHeaderButtonText}>⚙️</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -493,6 +501,17 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontSize: 12,
     fontWeight: '700',
+  },
+  settingsHeaderButton: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#64748b',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  settingsHeaderButtonText: {
+    fontSize: 14,
   },
   walletCardButton: {
     flexDirection: 'row',

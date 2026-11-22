@@ -5,6 +5,7 @@
 export const API_ENDPOINTS = {
   // Auth
   LOGIN: '/admin/auth/login',
+  CHANGE_PASSWORD: '/admin/auth/password',
 
   // Settings
   SETTINGS: '/admin/settings',

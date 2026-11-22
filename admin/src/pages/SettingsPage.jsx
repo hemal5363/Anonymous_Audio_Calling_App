@@ -74,6 +74,16 @@ export function SettingsPage() {
     max_otp_attempts: 3,
   });
 
+  // Admin password change form state (enforces strong admin password policy)
+  const [passwordForm, setPasswordForm] = useState({
+    current_password: '',
+    new_password: '',
+    confirm_password: '',
+  });
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordSuccess, setPasswordSuccess] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+
   // Confirmation modal state for monetization mode change
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
@@ -256,6 +266,50 @@ export function SettingsPage() {
       ...prev,
       subscription_plans: prev.subscription_plans.filter((_, i) => i !== index),
     }));
+  };
+
+  // Strong password policy checks
+  const hasMinLength = passwordForm.new_password.length >= 12;
+  const hasUpper = /[A-Z]/.test(passwordForm.new_password);
+  const hasLower = /[a-z]/.test(passwordForm.new_password);
+  const hasDigit = /\d/.test(passwordForm.new_password);
+  const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]/.test(passwordForm.new_password);
+  const passwordsMatch = Boolean(passwordForm.new_password && passwordForm.new_password === passwordForm.confirm_password);
+  const isStrongPassword = hasMinLength && hasUpper && hasLower && hasDigit && hasSpecial && passwordsMatch;
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setPasswordError('');
+    setPasswordSuccess('');
+
+    if (!passwordForm.current_password) {
+      setPasswordError('Please provide your current admin password.');
+      return;
+    }
+
+    if (!isStrongPassword) {
+      setPasswordError('New password must satisfy all security requirements (min 12 characters, uppercase, lowercase, number, symbol, and matching confirmation).');
+      return;
+    }
+
+    setPasswordSaving(true);
+    try {
+      await apiClient.patch(API_ENDPOINTS.CHANGE_PASSWORD, {
+        current_password: passwordForm.current_password,
+        new_password: passwordForm.new_password,
+      });
+
+      setPasswordSuccess('Admin password updated successfully. The new strong password is now active.');
+      setPasswordForm({
+        current_password: '',
+        new_password: '',
+        confirm_password: '',
+      });
+    } catch (err) {
+      setPasswordError(err.message || 'Failed to update admin password.');
+    } finally {
+      setPasswordSaving(false);
+    }
   };
 
   if (loading) {
@@ -704,7 +758,123 @@ export function SettingsPage() {
       </form>
 
       {/* ================================================================= */}
-      {/* 3. Confirmation Modal for Monetization Mode Change */}
+      {/* 3. Administrator Security & Strong Password Policy */}
+      {/* ================================================================= */}
+      <section className="settings-section" style={{ marginTop: '32px' }}>
+        <div className="section-header">
+          <h2 className="section-title">Administrator Security & Password Policy</h2>
+          <p className="section-desc">
+            Enforces strict password hygiene. Admin credentials require minimum 12 characters, uppercase, lowercase, numbers, and symbols.
+          </p>
+        </div>
+
+        {passwordSuccess && (
+          <div className="alert-banner alert-success" role="alert" style={{ marginBottom: '16px' }}>
+            <div className="alert-content">
+              <span className="alert-title">Password Updated</span>
+              <span className="alert-text">{passwordSuccess}</span>
+            </div>
+            <button className="alert-close" onClick={() => setPasswordSuccess('')} aria-label="Dismiss">✕</button>
+          </div>
+        )}
+
+        {passwordError && (
+          <div className="alert-banner alert-danger" role="alert" style={{ marginBottom: '16px' }}>
+            <div className="alert-content">
+              <span className="alert-title">Password Policy Error</span>
+              <span className="alert-text">{passwordError}</span>
+            </div>
+            <button className="alert-close" onClick={() => setPasswordError('')} aria-label="Dismiss">✕</button>
+          </div>
+        )}
+
+        <div className="settings-card">
+          <form onSubmit={handleChangePassword}>
+            <div className="form-grid-2">
+              <div className="form-group">
+                <label htmlFor="current-admin-pass">Current Password</label>
+                <input
+                  id="current-admin-pass"
+                  type="password"
+                  className="form-input"
+                  placeholder="Enter current password"
+                  value={passwordForm.current_password}
+                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, current_password: e.target.value }))}
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="form-grid-2" style={{ marginTop: '12px' }}>
+              <div className="form-group">
+                <label htmlFor="new-admin-pass">New Admin Password</label>
+                <input
+                  id="new-admin-pass"
+                  type="password"
+                  className="form-input"
+                  placeholder="At least 12 characters"
+                  value={passwordForm.new_password}
+                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, new_password: e.target.value }))}
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="confirm-admin-pass">Confirm New Password</label>
+                <input
+                  id="confirm-admin-pass"
+                  type="password"
+                  className="form-input"
+                  placeholder="Re-type new password"
+                  value={passwordForm.confirm_password}
+                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, confirm_password: e.target.value }))}
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Live Password Policy Checklist */}
+            <div style={{ marginTop: '14px', padding: '12px', background: '#0f172a', borderRadius: '8px', border: '1px solid #1e293b' }}>
+              <span style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', display: 'block', marginBottom: '8px' }}>
+                Strong Password Requirements:
+              </span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '6px', fontSize: '12px' }}>
+                <span style={{ color: hasMinLength ? '#22c55e' : '#64748b' }}>
+                  {hasMinLength ? '✓' : '○'} At least 12 characters
+                </span>
+                <span style={{ color: hasUpper ? '#22c55e' : '#64748b' }}>
+                  {hasUpper ? '✓' : '○'} One uppercase letter (A-Z)
+                </span>
+                <span style={{ color: hasLower ? '#22c55e' : '#64748b' }}>
+                  {hasLower ? '✓' : '○'} One lowercase letter (a-z)
+                </span>
+                <span style={{ color: hasDigit ? '#22c55e' : '#64748b' }}>
+                  {hasDigit ? '✓' : '○'} One number (0-9)
+                </span>
+                <span style={{ color: hasSpecial ? '#22c55e' : '#64748b' }}>
+                  {hasSpecial ? '✓' : '○'} One symbol (!@#$%^&*)
+                </span>
+                <span style={{ color: passwordsMatch ? '#22c55e' : '#64748b' }}>
+                  {passwordsMatch ? '✓' : '○'} Passwords match
+                </span>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={passwordSaving || !isStrongPassword}
+              >
+                {passwordSaving ? 'Updating Password...' : 'Update Admin Password'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      {/* ================================================================= */}
+      {/* 4. Confirmation Modal for Monetization Mode Change */}
       {/* ================================================================= */}
       {showConfirmModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">

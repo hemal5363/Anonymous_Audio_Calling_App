@@ -305,7 +305,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
     // 7. General Call Errors (Billing, daily cap, etc.)
     const handleError = (payload: any) => {
-      console.error('[Socket Event] call:error received:', payload?.error || payload);
+      console.error('[Socket Event] call:error received:', payload?.error || payload?.message || 'unknown_error');
       stopDurationTimer();
       audioEngine.cleanup();
 

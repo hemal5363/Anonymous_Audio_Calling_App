@@ -21,6 +21,7 @@ import {
   stopCallBillingTimer,
   isCallBillingTimerActive,
 } from '../services/billing.service.js';
+import { socketAbuseGuard } from './socketAbuseGuard.js';
 
 let ioInstance = null;
 
@@ -33,6 +34,7 @@ export function initSocketServer(httpServer) {
   const io = new Server(httpServer, {
     path: '/socket.io',
     transports: ['polling', 'websocket'], // Allow both polling and websocket, polling first
+    maxHttpBufferSize: config.socketAbuse.maxPayloadBytes,
     allowRequest: (req, callback) => {
       const origin = req.headers.origin;
       // Allow non-browser requests with no origin (curl, React Native, mobile apps)
@@ -74,6 +76,34 @@ export function initSocketServer(httpServer) {
 
   io.on('connection', (socket) => {
     const userId = socket.userId;
+
+    // Single active socket session enforcement: latest connection takes over
+    const existingSocketId = userSocketMap.getSocketId(userId);
+    if (existingSocketId && existingSocketId !== socket.id) {
+      const existingSocket = io.sockets.sockets.get(existingSocketId);
+      if (existingSocket) {
+        logger.info(`User ${userId} signed in on new socket [${socket.id}]. Superseding existing socket [${existingSocketId}].`);
+        existingSocket.emit('auth:superseded', {
+          message: 'Signed in from another device. This session has been disconnected.',
+        });
+        const activeSession = callSessionManager.getSessionByUserId(userId);
+        if (activeSession) {
+          endCall({ callCode: activeSession.callCode, userId, reason: 'superseded' }).catch(() => {});
+          const endPayload = {
+            callCode: activeSession.callCode,
+            sessionId: activeSession.sessionId,
+            reason: 'superseded',
+          };
+          io.to(`call:${activeSession.callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+          const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+          const peerSocketId = userSocketMap.getSocketId(peerUserId);
+          if (peerSocketId) {
+            io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+          }
+        }
+        existingSocket.disconnect(true);
+      }
+    }
 
     // Track user socket in memory map
     userSocketMap.set(userId, socket.id);
@@ -137,8 +167,12 @@ export function initSocketServer(httpServer) {
       const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
       if (!ack) return;
 
-      const sessionId = payload?.sessionId;
-      if (!sessionId) {
+      if (!payload || typeof payload !== 'object') {
+        return ack({ error: 'invalid_payload' });
+      }
+
+      const sessionId = payload.sessionId;
+      if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 100) {
         return ack({ error: 'sessionId_required' });
       }
 
@@ -206,10 +240,64 @@ export function initSocketServer(httpServer) {
     const handleCallFind = async (payload, callback) => {
       const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
 
+      // 0. Check if user already has an active session in-memory
+      const existingSession = callSessionManager.getSessionByUserId(userId);
+      if (existingSession) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'already_in_call',
+          message: 'You are already in an active call.',
+        });
+        if (ack) {
+          return ack({
+            success: false,
+            error: 'already_in_call',
+            message: 'You are already in an active call.',
+          });
+        }
+        return;
+      }
+
+      // 1. Check skip/cancel cooldown
+      const cooldownCheck = socketAbuseGuard.checkCooldown(userId);
+      if (cooldownCheck.inCooldown) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'cooldown_active',
+          message: `Too many skips or cancels in a short period. Please wait ${cooldownCheck.retryAfterSeconds} second(s) before searching again.`,
+          retryAfterSeconds: cooldownCheck.retryAfterSeconds,
+        });
+        if (ack) {
+          return ack({
+            success: false,
+            error: 'cooldown_active',
+            message: `Too many skips or cancels. Please wait ${cooldownCheck.retryAfterSeconds}s.`,
+            retryAfterSeconds: cooldownCheck.retryAfterSeconds,
+          });
+        }
+        return;
+      }
+
+      // 2. Check per-user call:find rate limit
+      const rateLimitCheck = socketAbuseGuard.checkRateLimit(userId, 'callFind');
+      if (!rateLimitCheck.allowed) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'rate_limit_exceeded',
+          message: 'Too many call search requests. Please wait a moment before searching again.',
+        });
+        if (ack) {
+          return ack({
+            success: false,
+            error: 'rate_limit_exceeded',
+            message: 'Too many call search requests. Please slow down.',
+          });
+        }
+        return;
+      }
+
       try {
         const liveSocketUserIds = userSocketMap.getOnlineUserIds();
+        const busyUserIds = Array.from(callSessionManager.sessionsByUser.keys());
         logger.debug(`Call find requested [socketId: ${socket.id}]`);
-        const matchResult = await matchCaller(userId, liveSocketUserIds);
+        const matchResult = await matchCaller(userId, liveSocketUserIds, busyUserIds);
 
         if (!matchResult.success) {
           if (matchResult.error === 'no_users_available') {
@@ -274,10 +362,16 @@ export function initSocketServer(httpServer) {
 
               const callerSockId = userSocketMap.getSocketId(s.callerId);
               if (callerSockId) {
+                io.to(callerSockId).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
                 io.to(callerSockId).emit(SOCKET_EVENTS.CALL_NONE_AVAILABLE, {
                   error: 'no_users_available',
                   message: 'Call timed out with no answer.',
                 });
+              }
+
+              const calleeSockId = userSocketMap.getSocketId(s.calleeId);
+              if (calleeSockId) {
+                io.to(calleeSockId).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
               }
             } catch (err) {
               logger.error('Error handling ringing timeout:', err.message);
@@ -357,10 +451,30 @@ export function initSocketServer(httpServer) {
     // -----------------------------------------------------------------------
     socket.on(SOCKET_EVENTS.CALL_ACCEPT, async (payload, callback) => {
       const ack = typeof callback === 'function' ? callback : null;
-      const callCode = payload?.callCode;
 
-      if (!callCode) {
+      const rateCheck = socketAbuseGuard.checkRateLimit(userId, 'accept');
+      if (!rateCheck.allowed) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'rate_limit_exceeded',
+          message: 'Too many call response actions. Please slow down.',
+        });
+        if (ack) ack({ success: false, error: 'rate_limit_exceeded' });
+        return;
+      }
+
+      if (!payload || typeof payload !== 'object') {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
+        if (ack) ack({ success: false, error: 'invalid_payload' });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
+        return;
+      }
+
+      const callCode = payload.callCode;
+
+      if (!callCode || typeof callCode !== 'string' || callCode.length > 100) {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
         if (ack) ack({ success: false, error: 'missing_call_code' });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
         return;
       }
 
@@ -399,11 +513,31 @@ export function initSocketServer(httpServer) {
 
     const handleDecline = async (payload, callback) => {
       const ack = typeof callback === 'function' ? callback : null;
-      const callCode = payload?.callCode;
+
+      const rateCheck = socketAbuseGuard.checkRateLimit(userId, 'accept');
+      if (!rateCheck.allowed) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'rate_limit_exceeded',
+          message: 'Too many call response actions. Please slow down.',
+        });
+        if (ack) ack({ success: false, error: 'rate_limit_exceeded' });
+        return;
+      }
+
+      if (!payload || typeof payload !== 'object') {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
+        if (ack) ack({ success: false, error: 'invalid_payload' });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
+        return;
+      }
+
+      const callCode = payload.callCode;
       const reason = payload?.reason || 'declined';
 
-      if (!callCode) {
+      if (!callCode || typeof callCode !== 'string' || callCode.length > 100) {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
         if (ack) ack({ success: false, error: 'missing_call_code' });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
         return;
       }
 
@@ -420,6 +554,20 @@ export function initSocketServer(httpServer) {
         reason: 'declined',
       });
 
+      const callerSocketId = userSocketMap.getSocketId(res.callerId);
+      if (callerSocketId) {
+        io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+          callCode,
+          durationSeconds: 0,
+          reason: 'declined',
+        });
+      }
+      socket.emit(SOCKET_EVENTS.CALL_ENDED, {
+        callCode,
+        durationSeconds: 0,
+        reason: 'declined',
+      });
+
       if (ack) ack({ success: true });
     };
 
@@ -430,12 +578,43 @@ export function initSocketServer(httpServer) {
     // 4. WebRTC Signaling Relays (between matched users ONLY)
     // -----------------------------------------------------------------------
     const handleRelay = (eventName) => (payload) => {
-      const callCode = payload?.callCode;
-      if (!callCode) {
+      if (!payload || typeof payload !== 'object') {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'invalid_payload',
+          message: 'Signaling payload must be an object',
+        });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
+        return;
+      }
+
+      if (!socketAbuseGuard.isPayloadSizeValid(payload)) {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'payload_too_large',
+          message: 'Signaling payload exceeds maximum allowed size.',
+        });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
+        return;
+      }
+
+      const rateCheck = socketAbuseGuard.checkRateLimit(userId, 'signal');
+      if (!rateCheck.allowed) {
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, {
+          error: 'rate_limit_exceeded',
+          message: 'Signaling rate limit exceeded. Please slow down.',
+        });
+        return;
+      }
+
+      const callCode = payload.callCode;
+      if (!callCode || typeof callCode !== 'string' || callCode.length > 100) {
+        const malformed = socketAbuseGuard.recordMalformedEvent(socket.id);
         socket.emit(SOCKET_EVENTS.CALL_ERROR, {
           error: 'missing_call_code',
-          message: 'callCode is required for signaling',
+          message: 'callCode is required and must be a valid string',
         });
+        if (malformed.shouldDisconnect) socket.disconnect(true);
         return;
       }
 
@@ -486,15 +665,56 @@ export function initSocketServer(httpServer) {
     // Call End or Cancel (including ringing cancellations)
     const handleCallEndOrCancel = async (payload, callback) => {
       const ack = typeof callback === 'function' ? callback : null;
-      const callCode = payload?.callCode;
-      const reason = payload?.reason;
+      if (!payload || typeof payload !== 'object') {
+        if (ack) ack({ success: false, error: 'invalid_payload' });
+        return;
+      }
 
-      if (!callCode) {
+      const callCode = payload.callCode;
+      const reason = typeof payload.reason === 'string' && payload.reason.length <= 50 ? payload.reason : null;
+
+      if (!callCode || typeof callCode !== 'string' || callCode.length > 100) {
         if (ack) ack({ success: false, error: 'missing_call_code' });
         return;
       }
 
       if (!callSessionManager.isParticipant(callCode, userId)) {
+        try {
+          const { rows } = await pool.query(
+            `SELECT caller_id, callee_id, status FROM call_sessions WHERE call_code = $1;`,
+            [callCode]
+          );
+          if (rows.length > 0 && (rows[0].caller_id === userId || rows[0].callee_id === userId)) {
+            if (['ended', 'declined', 'missed', 'failed'].includes(rows[0].status)) {
+              // Authorized participant of a call that has already concluded
+              if (ack) ack({ success: true, alreadyEnded: true });
+              return;
+            }
+            // Active session still in DB: end it properly
+            const res = await endCall({ callCode, userId, reason });
+            if (res.success) {
+              io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
+                callCode,
+                durationSeconds: res.durationSeconds,
+                reason: res.reason,
+              });
+              const peerUserId = userId === res.callerId ? res.calleeId : res.callerId;
+              const peerSocketId = userSocketMap.getSocketId(peerUserId);
+              if (peerSocketId) {
+                io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                  callCode,
+                  durationSeconds: res.durationSeconds,
+                  reason: res.reason,
+                });
+              }
+              if (ack) ack({ success: true, durationSeconds: res.durationSeconds, reason: res.reason });
+            }
+            return;
+          }
+        } catch (dbErr) {
+          logger.warn('Error verifying past participant in DB:', dbErr.message);
+        }
+
         socket.emit(SOCKET_EVENTS.CALL_ERROR, {
           error: 'unauthorized',
           message: 'You are not an authorized participant in this call session.',
@@ -508,8 +728,15 @@ export function initSocketServer(httpServer) {
       // Handle cancel while call is ringing: end session immediately with caller_left, clear ring timeout, release both users
       if (session && session.status === 'ringing' && !session.connectedAt) {
         const isCaller = session.callerId === userId;
-        const endReason = isCaller ? 'caller_left' : (reason || 'callee_hangup');
+        let endReason = isCaller ? 'caller_left' : (reason || 'callee_hangup');
+        const allowedReasons = ['caller_hangup', 'callee_hangup', 'declined', 'ring_timeout', 'skipped', 'balance_exhausted', 'network_error', 'system_shutdown', 'caller_left', 'cancelled'];
+        if (!allowedReasons.includes(endReason)) {
+          endReason = isCaller ? 'caller_left' : 'callee_hangup';
+        }
         logger.debug(`Ringing call cancelled [callCode: ${callCode}, reason: ${endReason}]`);
+
+        // Record cancel for abuse tracking / cooldown
+        socketAbuseGuard.recordSkipOrCancel(userId);
 
         callSessionManager.clearRingingTimer(session);
         callSessionManager.endSession(callCode);
@@ -521,6 +748,7 @@ export function initSocketServer(httpServer) {
              WHERE call_code = $2;`,
             [endReason, callCode]
           );
+          await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [callCode]);
 
           io.to(`call:${callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, {
             callCode,
@@ -554,6 +782,16 @@ export function initSocketServer(httpServer) {
           reason: res.reason,
         });
 
+        const peerUserId = userId === res.callerId ? res.calleeId : res.callerId;
+        const peerSocketId = userSocketMap.getSocketId(peerUserId);
+        if (peerSocketId) {
+          io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+            callCode,
+            durationSeconds: res.durationSeconds,
+            reason: res.reason,
+          });
+        }
+
         if (ack) ack({ success: true, durationSeconds: res.durationSeconds, reason: res.reason });
       }
     };
@@ -582,6 +820,7 @@ export function initSocketServer(httpServer) {
       }
 
       // End current call with reason 'skipped'
+      socketAbuseGuard.recordSkipOrCancel(userId);
       const res = await endCall({ callCode, userId, reason: 'skipped' });
 
       // Notify callee
@@ -605,10 +844,11 @@ export function initSocketServer(httpServer) {
 
     // Mute State Relay
     socket.on(SOCKET_EVENTS.CALL_MUTE, (payload) => {
-      const callCode = payload?.callCode;
-      const isMuted = Boolean(payload?.isMuted);
+      if (!payload || typeof payload !== 'object') return;
+      const callCode = payload.callCode;
+      const isMuted = Boolean(payload.isMuted);
 
-      if (!callCode || !callSessionManager.isParticipant(callCode, userId)) {
+      if (!callCode || typeof callCode !== 'string' || callCode.length > 100 || !callSessionManager.isParticipant(callCode, userId)) {
         return;
       }
 
@@ -665,6 +905,7 @@ export function initSocketServer(httpServer) {
     // -----------------------------------------------------------------------
     socket.on('disconnect', async (reason) => {
       userSocketMap.removeBySocketId(socket.id);
+      socketAbuseGuard.cleanSocket(socket.id);
       logger.debug(`Socket disconnected [socketId: ${socket.id}, reason: ${reason}]`);
 
       // Check if user is in an active session
@@ -684,6 +925,7 @@ export function initSocketServer(httpServer) {
                  WHERE call_code = $1;`,
                 [activeSession.callCode]
               );
+              await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [activeSession.callCode]);
 
               const calleeSocketId = userSocketMap.getSocketId(activeSession.calleeId);
               if (calleeSocketId) {
@@ -709,6 +951,7 @@ export function initSocketServer(httpServer) {
                  WHERE call_code = $1;`,
                 [activeSession.callCode]
               );
+              await pool.query(`UPDATE users SET active_call_code = NULL WHERE active_call_code = $1;`, [activeSession.callCode]);
 
               const callerSocketId = userSocketMap.getSocketId(activeSession.callerId);
               if (callerSocketId) {
@@ -769,4 +1012,4 @@ export function getIO() {
   return ioInstance;
 }
 
-export { userSocketMap, callSessionManager, SOCKET_EVENTS };
+export { userSocketMap, callSessionManager, socketAbuseGuard, SOCKET_EVENTS };

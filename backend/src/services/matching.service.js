@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
 import { pool } from '../db/index.js';
 import { checkCallerBillingStanding } from './billing.service.js';
 import { logger } from '../utils/logger.js';
+import { callSessionManager } from '../socket/callSessionManager.js';
 
 /**
  * Executes the atomic candidate matching algorithm as specified in docs/CALL_FLOW.md.
@@ -11,7 +13,7 @@ import { logger } from '../utils/logger.js';
  * 3. Bidirectional blocks are strictly respected.
  * 4. Anonymous tokens only (neither party receives the other's ID, email, or phone).
  */
-export async function matchCaller(callerId, liveSocketUserIds = []) {
+export async function matchCaller(callerId, liveSocketUserIds = [], busyUserIds = []) {
   const client = await pool.connect();
 
   try {
@@ -71,14 +73,21 @@ export async function matchCaller(callerId, liveSocketUserIds = []) {
       ? liveSocketUserIds.filter((id) => typeof id === 'string' && id !== callerId)
       : [];
 
+    const busyIds = Array.isArray(busyUserIds)
+      ? busyUserIds.filter((id) => typeof id === 'string')
+      : [];
+
     const candidateQuery = `
       WITH eligible_candidate AS (
         SELECT u.id, u.push_token
         FROM users u
         WHERE u.status = 'active'
           AND u.is_available = TRUE
+          AND u.active_call_code IS NULL
           AND u.id <> $1
-          -- Exclude busy users
+          -- Exclude in-memory active users
+          AND NOT (u.id = ANY($3::uuid[]))
+          -- Exclude busy users in DB
           AND NOT EXISTS (
             SELECT 1 FROM call_sessions cs
             WHERE (cs.caller_id = u.id OR cs.callee_id = u.id)
@@ -107,7 +116,7 @@ export async function matchCaller(callerId, liveSocketUserIds = []) {
       SELECT id, push_token FROM eligible_candidate;
     `;
 
-    const candidateRes = await client.query(candidateQuery, [callerId, liveIds]);
+    const candidateRes = await client.query(candidateQuery, [callerId, liveIds, busyIds]);
 
     if (candidateRes.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -120,31 +129,55 @@ export async function matchCaller(callerId, liveSocketUserIds = []) {
 
     const callee = candidateRes.rows[0];
 
+    // Double-check in-memory state: callee must not have become busy while query was executing
+    if (callSessionManager.getSessionByUserId(callee.id)) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        error: 'no_users_available',
+        message: 'No available users at this moment.',
+      };
+    }
+
     // 5. Create call_sessions row with status 'ringing'
-    const sessionRes = await client.query(
-      `INSERT INTO call_sessions (
-         call_code,
-         caller_id,
-         callee_id,
-         status,
-         billing_mode,
-         requested_at
-       )
-       VALUES (
-         gen_random_uuid()::text,
-         $1,
-         $2,
-         'ringing',
-         $3,
-         CURRENT_TIMESTAMP
-       )
-       RETURNING id, call_code, status, billing_mode, requested_at;`,
-      [callerId, callee.id, billingResult.mode]
-    );
+    let session;
+    try {
+      const sessionRes = await client.query(
+        `INSERT INTO call_sessions (
+           call_code,
+           caller_id,
+           callee_id,
+           status,
+           billing_mode,
+           requested_at
+         )
+         VALUES (
+           gen_random_uuid()::text,
+           $1,
+           $2,
+           'ringing',
+           $3,
+           CURRENT_TIMESTAMP
+         )
+         RETURNING id, call_code, status, billing_mode, requested_at;`,
+        [callerId, callee.id, billingResult.mode]
+      );
 
-    const session = sessionRes.rows[0];
-
-    await client.query('COMMIT');
+      session = sessionRes.rows[0];
+      await client.query('COMMIT');
+    } catch (insertErr) {
+      await client.query('ROLLBACK');
+      if (insertErr.code === '23505') {
+        // Concurrency conflict caught atomically by trigger
+        logger.debug('Concurrent claim conflict on call_sessions insert:', insertErr.message);
+        return {
+          success: false,
+          error: 'no_users_available',
+          message: 'No available users at this moment.',
+        };
+      }
+      throw insertErr;
+    }
 
     logger.info(`Call matched atomically: [SessionId: ${session.id}, CallCode: ${session.call_code}, BillingMode: ${session.billing_mode}]`);
 

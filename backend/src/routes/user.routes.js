@@ -9,6 +9,7 @@ import {
   unblockUser,
   reportUser,
   getCallHistory,
+  deleteAccount,
 } from '../controllers/user.controller.js';
 import { authenticateUser } from '../middleware/auth.middleware.js';
 
@@ -38,5 +39,9 @@ router.post('/reports', reportUser);
 
 // Call History via user endpoint
 router.get('/calls', getCallHistory);
+
+// 3.5 Delete Account (Google Play Compliance)
+router.delete('/account', deleteAccount);
+router.delete('/me', deleteAccount);
 
 export default router;

@@ -18,6 +18,24 @@ const app = express();
 // Security and standard middlewares
 app.use(helmet());
 
+// Reverse proxy trust configuration (Nginx, ALB, Cloudflare)
+const parsedTrustProxy = (() => {
+  const val = config.trustProxy;
+  if (val === 'true' || val === true) return true;
+  if (val === 'false' || val === false) return false;
+  if (!isNaN(Number(val))) return Number(val);
+  return val;
+})();
+app.set('trust proxy', parsedTrustProxy);
+app.use((req, res, next) => {
+  if (config.env === 'production') {
+    if (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https') {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+  }
+  next();
+});
+
 // CORS configuration reading allowed origins from environment
 const corsOptions = {
   origin: (origin, callback) => {
