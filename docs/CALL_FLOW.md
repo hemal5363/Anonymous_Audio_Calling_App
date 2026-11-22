@@ -81,7 +81,7 @@ When a caller taps **Call**, the server validates the caller's account and billi
 3. `users.is_available = TRUE`
 4. Not currently participating in an active call (`call_sessions.status NOT IN ('requested', 'ringing', 'connected')`).
 5. Neither caller has blocked the candidate, nor has the candidate blocked the caller (checked against `blocks` table).
-6. Not matched with the caller within the recent cooldown window (default: 30 minutes).
+6. Not matched with the caller within the same-peer rematch cooldown window (`cooldown_same_peer_seconds` in `app_settings`, integer 0 to 86400, default: 60 seconds; 0 disables the restriction and allows immediate rematch). Block and report exclusions are never bypassed even if cooldown is 0.
 
 ### 3.2 Two-Tier Priority (Live Socket vs Push)
 To minimize call connection latency:
@@ -114,12 +114,15 @@ WITH eligible_candidate AS (
           WHERE (b.blocker_id = :caller_id AND b.blocked_id = u.id)
              OR (b.blocker_id = u.id AND b.blocked_id = :caller_id)
       )
-      -- Cooldown: avoid rematching with same user in past 30 mins
-      AND NOT EXISTS (
-          SELECT 1 FROM call_sessions cs_recent
-          WHERE ((cs_recent.caller_id = :caller_id AND cs_recent.callee_id = u.id)
-              OR (cs_recent.caller_id = u.id AND cs_recent.callee_id = :caller_id))
-            AND cs_recent.created_at > (NOW() - INTERVAL '30 minutes')
+      -- Cooldown: avoid rematching with same user in past cooldown window (if enabled)
+      AND (
+          :cooldown_seconds <= 0
+          OR NOT EXISTS (
+              SELECT 1 FROM call_sessions cs_recent
+              WHERE ((cs_recent.caller_id = :caller_id AND cs_recent.callee_id = u.id)
+                  OR (cs_recent.caller_id = u.id AND cs_recent.callee_id = :caller_id))
+                AND cs_recent.created_at > (NOW() - (:cooldown_seconds * INTERVAL '1 second'))
+          )
       )
     ORDER BY 
       -- Prioritize users with live socket connection (passed as parameter array)

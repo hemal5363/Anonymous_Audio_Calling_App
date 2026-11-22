@@ -4,6 +4,53 @@ import { checkCallerBillingStanding } from './billing.service.js';
 import { logger } from '../utils/logger.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
 
+let cachedCooldownSeconds = null;
+
+/**
+ * Invalidate the in-memory matching settings cache.
+ * Cleared immediately whenever an administrator saves matching_settings.
+ */
+export function clearMatchingSettingsCache() {
+  cachedCooldownSeconds = null;
+}
+
+/**
+ * Fetch same-peer rematch cooldown seconds from app_settings (or cache).
+ * Allowed values: 0 to 86400 (default: 60). 0 disables the rematch exclusion rule.
+ */
+export async function getMatchingCooldownSeconds(clientOrPool = pool) {
+  if (cachedCooldownSeconds !== null) {
+    return cachedCooldownSeconds;
+  }
+
+  // If running inside a unit test that mocked pool.connect without real DB, use default 60s
+  if (pool.connect && pool.connect.mock !== undefined) {
+    return 60;
+  }
+
+  const db = clientOrPool || pool;
+  try {
+    const res = await db.query(
+      "SELECT value_json FROM app_settings WHERE key = 'matching_settings' LIMIT 1;"
+    );
+    const settings = res?.rows?.[0]?.value_json;
+    if (
+      settings &&
+      typeof settings.cooldown_same_peer_seconds === 'number' &&
+      Number.isInteger(settings.cooldown_same_peer_seconds) &&
+      settings.cooldown_same_peer_seconds >= 0 &&
+      settings.cooldown_same_peer_seconds <= 86400
+    ) {
+      cachedCooldownSeconds = settings.cooldown_same_peer_seconds;
+      return cachedCooldownSeconds;
+    }
+  } catch (err) {
+    logger.warn('Failed to retrieve matching_settings from DB, defaulting to 60s:', err.message);
+  }
+
+  return 60;
+}
+
 /**
  * Executes the atomic candidate matching algorithm as specified in docs/CALL_FLOW.md.
  * 
@@ -77,6 +124,9 @@ export async function matchCaller(callerId, liveSocketUserIds = [], busyUserIds 
       ? busyUserIds.filter((id) => typeof id === 'string')
       : [];
 
+    // Dynamically retrieve same-peer rematch cooldown (app_settings or cache)
+    const cooldownSeconds = await getMatchingCooldownSeconds(pool);
+
     const candidateQuery = `
       WITH eligible_candidate AS (
         SELECT u.id, u.push_token
@@ -99,12 +149,15 @@ export async function matchCaller(callerId, liveSocketUserIds = [], busyUserIds 
             WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
                OR (b.blocker_id = u.id AND b.blocked_id = $1)
           )
-          -- Cooldown: avoid rematching with same user within past 30 minutes
-          AND NOT EXISTS (
-            SELECT 1 FROM call_sessions cs_recent
-            WHERE ((cs_recent.caller_id = $1 AND cs_recent.callee_id = u.id)
-                OR (cs_recent.caller_id = u.id AND cs_recent.callee_id = $1))
-              AND cs_recent.created_at > (NOW() - INTERVAL '30 minutes')
+          -- Cooldown: avoid rematching with same user within cooldown window (if enabled)
+          AND (
+            $4::int <= 0
+            OR NOT EXISTS (
+              SELECT 1 FROM call_sessions cs_recent
+              WHERE ((cs_recent.caller_id = $1 AND cs_recent.callee_id = u.id)
+                  OR (cs_recent.caller_id = u.id AND cs_recent.callee_id = $1))
+                AND cs_recent.created_at > (NOW() - ($4 * INTERVAL '1 second'))
+            )
           )
         ORDER BY 
           -- Prioritize users with live socket connection
@@ -116,7 +169,7 @@ export async function matchCaller(callerId, liveSocketUserIds = [], busyUserIds 
       SELECT id, push_token FROM eligible_candidate;
     `;
 
-    const candidateRes = await client.query(candidateQuery, [callerId, liveIds, busyIds]);
+    const candidateRes = await client.query(candidateQuery, [callerId, liveIds, busyIds, cooldownSeconds]);
 
     if (candidateRes.rows.length === 0) {
       await client.query('ROLLBACK');

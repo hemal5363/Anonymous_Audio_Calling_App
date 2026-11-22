@@ -72,7 +72,7 @@ async function runSeed() {
         value: {
           ring_timeout_seconds: 30,
           max_match_attempts: 3,
-          cooldown_same_peer_seconds: 1800,
+          cooldown_same_peer_seconds: 60,
           try_live_presence_first: true,
         },
         description: 'Matching engine thresholds and retry limits',

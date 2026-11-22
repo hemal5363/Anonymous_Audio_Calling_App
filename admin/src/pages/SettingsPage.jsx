@@ -74,6 +74,13 @@ export function SettingsPage() {
     max_otp_attempts: 3,
   });
 
+  const [matchingSettings, setMatchingSettings] = useState({
+    cooldown_same_peer_seconds: 60,
+    ring_timeout_seconds: 30,
+    max_match_attempts: 3,
+    try_live_presence_first: true,
+  });
+
   // Admin password change form state (enforces strong admin password policy)
   const [passwordForm, setPasswordForm] = useState({
     current_password: '',
@@ -96,6 +103,7 @@ export function SettingsPage() {
 
       const mon = data.monetization || {};
       const auth = data.auth_settings || {};
+      const mat = data.matching_settings || {};
 
       const loadedMonetization = {
         mode: mon.mode || 'free',
@@ -114,11 +122,20 @@ export function SettingsPage() {
         max_otp_attempts: auth.max_otp_attempts ? Number(auth.max_otp_attempts) : 3,
       };
 
+      const loadedMatching = {
+        cooldown_same_peer_seconds: mat.cooldown_same_peer_seconds !== undefined ? Number(mat.cooldown_same_peer_seconds) : 60,
+        ring_timeout_seconds: mat.ring_timeout_seconds !== undefined ? Number(mat.ring_timeout_seconds) : 30,
+        max_match_attempts: mat.max_match_attempts !== undefined ? Number(mat.max_match_attempts) : 3,
+        try_live_presence_first: mat.try_live_presence_first !== undefined ? Boolean(mat.try_live_presence_first) : true,
+      };
+
       setMonetization(loadedMonetization);
       setAuthSettings(loadedAuth);
+      setMatchingSettings(loadedMatching);
       setSavedSettings({
         monetization: loadedMonetization,
         auth_settings: loadedAuth,
+        matching_settings: loadedMatching,
       });
     } catch (err) {
       setErrorMsg(err.message || 'Failed to load system settings from server.');
@@ -171,6 +188,18 @@ export function SettingsPage() {
       }
     }
 
+    // Matching settings validation (0 to 86400 seconds integer)
+    const cooldownVal = matchingSettings.cooldown_same_peer_seconds;
+    if (
+      cooldownVal === '' ||
+      isNaN(Number(cooldownVal)) ||
+      !Number.isInteger(Number(cooldownVal)) ||
+      Number(cooldownVal) < 0 ||
+      Number(cooldownVal) > 86400
+    ) {
+      errors.cooldown_same_peer_seconds = 'Cooldown must be an integer between 0 and 86400 seconds.';
+    }
+
     setValidationErrors(errors);
     return Object.keys(errors).length === 0;
   };
@@ -205,9 +234,18 @@ export function SettingsPage() {
         },
       });
 
+      // 3. Update matching settings (including same-peer rematch cooldown)
+      await apiClient.put(API_ENDPOINTS.SETTING_BY_KEY('matching_settings'), {
+        value_json: {
+          ...matchingSettings,
+          cooldown_same_peer_seconds: Number(matchingSettings.cooldown_same_peer_seconds),
+        },
+      });
+
       setSavedSettings({
         monetization: { ...monetization },
         auth_settings: { ...authSettings },
+        matching_settings: { ...matchingSettings },
       });
 
       setSuccessMsg('Settings saved successfully! New configurations apply immediately to all active and subsequent calls.');
@@ -721,6 +759,109 @@ export function SettingsPage() {
                   <input type="checkbox" checked={true} disabled />
                   <span className="slider round"></span>
                 </label>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ================================================================= */}
+        {/* 3. Matching Section */}
+        {/* ================================================================= */}
+        <section className="settings-section">
+          <div className="section-header">
+            <h2 className="section-title">Matching</h2>
+            <p className="section-desc">Configure peer matching rules, rematch cooldowns, and pairing thresholds.</p>
+          </div>
+
+          <div className="settings-card">
+            <div className="form-group" style={{ maxWidth: '540px' }}>
+              <label htmlFor="cooldown-same-peer">
+                Don't re-match the same two users for N seconds
+                <span className="label-help">
+                  0 = allow immediate rematch. Higher values reduce repeat matches but can cause 'no users available' when few users are online.
+                </span>
+              </label>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
+                <input
+                  id="cooldown-same-peer"
+                  type="number"
+                  min="0"
+                  max="86400"
+                  step="1"
+                  className={`form-input ${validationErrors.cooldown_same_peer_seconds ? 'input-error' : ''}`}
+                  value={matchingSettings.cooldown_same_peer_seconds}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setMatchingSettings((prev) => ({ ...prev, cooldown_same_peer_seconds: val }));
+                    if (validationErrors.cooldown_same_peer_seconds) {
+                      setValidationErrors((prev) => {
+                        const updated = { ...prev };
+                        delete updated.cooldown_same_peer_seconds;
+                        return updated;
+                      });
+                    }
+                  }}
+                  style={{ width: '160px' }}
+                />
+                <span style={{ color: '#94a3b8', fontSize: '14px' }}>seconds</span>
+
+                {savedSettings?.matching_settings?.cooldown_same_peer_seconds !== undefined && (
+                  <span style={{ color: '#64748b', fontSize: '13px', marginLeft: 'auto' }}>
+                    Saved value: <strong>{savedSettings.matching_settings.cooldown_same_peer_seconds}s</strong>
+                  </span>
+                )}
+              </div>
+
+              {validationErrors.cooldown_same_peer_seconds && (
+                <span className="form-error-text" style={{ marginTop: '6px', display: 'block' }}>
+                  {validationErrors.cooldown_same_peer_seconds}
+                </span>
+              )}
+
+              {/* Quick preset buttons: 0, 30s, 60s, 5 min, 30 min */}
+              <div style={{ marginTop: '14px' }}>
+                <span style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '8px' }}>
+                  Quick Presets:
+                </span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {[
+                    { label: '0 (Allow immediate rematch)', value: 0 },
+                    { label: '30s', value: 30 },
+                    { label: '60s', value: 60 },
+                    { label: '5 min', value: 300 },
+                    { label: '30 min', value: 1800 },
+                  ].map((preset) => {
+                    const isSelected = Number(matchingSettings.cooldown_same_peer_seconds) === preset.value && matchingSettings.cooldown_same_peer_seconds !== '';
+                    return (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        onClick={() => {
+                          setMatchingSettings((prev) => ({ ...prev, cooldown_same_peer_seconds: preset.value }));
+                          setValidationErrors((prev) => {
+                            const updated = { ...prev };
+                            delete updated.cooldown_same_peer_seconds;
+                            return updated;
+                          });
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          borderRadius: '6px',
+                          border: isSelected ? '1px solid #3b82f6' : '1px solid #334155',
+                          background: isSelected ? '#1d4ed8' : '#1e293b',
+                          color: isSelected ? '#ffffff' : '#cbd5e1',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>

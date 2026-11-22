@@ -728,7 +728,7 @@ Reads and modifies global system configuration, including monetization mode, mob
   "matching_settings": {
     "ring_timeout_seconds": 30,
     "max_match_attempts": 3,
-    "cooldown_same_peer_seconds": 1800,
+    "cooldown_same_peer_seconds": 60,
     "try_live_presence_first": true
   },
   "moderation_settings": {
@@ -764,10 +764,16 @@ Reads and modifies global system configuration, including monetization mode, mob
 }
 ```
 - **Error Codes:**
-  - `400 Bad Request`: Invalid setting payload structure.
+  - `400 Bad Request`: Invalid setting payload structure (e.g. `cooldown_same_peer_seconds` not an integer between 0 and 86400).
   - `401 Unauthorized`: Invalid admin token.
   - `403 Forbidden`: Insufficient role permissions.
   - `404 Not Found`: Setting key does not exist.
+
+##### Matching Settings Parameters (`key = 'matching_settings'`)
+- `cooldown_same_peer_seconds`: Integer (0 to 86400, default: `60`). Prevents rematching the same two users within N seconds. When set to `0`, the restriction is disabled (immediate rematch allowed). Dynamically evaluated from database/cache on every match attempt without requiring a server restart. Blocked users remain strictly excluded regardless of this setting.
+- `ring_timeout_seconds`: Ringing timeout before unanswered call auto-cancels (default: `30`).
+- `max_match_attempts`: Max automated match retries (default: `3`).
+- `try_live_presence_first`: Prioritize online websocket presence over push wake-up (default: `true`).
 
 ---
 

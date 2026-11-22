@@ -8,6 +8,7 @@ import { userSocketMap } from '../socket/userSocketMap.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
 import { getIO, SOCKET_EVENTS } from '../socket/index.js';
 import { endCall } from '../services/call.service.js';
+import { clearMatchingSettingsCache } from '../services/matching.service.js';
 
 // Schemas
 const adminLoginSchema = z.object({
@@ -34,6 +35,17 @@ const updateSettingSchema = z.object({
     required_error: 'value_json is required and must be an object',
   }),
 });
+
+const matchingSettingsSchema = z.object({
+  cooldown_same_peer_seconds: z
+    .number({
+      required_error: 'cooldown_same_peer_seconds is required',
+      invalid_type_error: 'cooldown_same_peer_seconds must be an integer between 0 and 86400',
+    })
+    .int('cooldown_same_peer_seconds must be an integer between 0 and 86400')
+    .min(0, 'cooldown_same_peer_seconds must be between 0 and 86400')
+    .max(86400, 'cooldown_same_peer_seconds must be between 0 and 86400'),
+}).passthrough();
 
 const updateUserStatusSchema = z.object({
   status: z.enum(['active', 'suspended', 'banned', 'flagged'], {
@@ -413,10 +425,23 @@ export async function updateSetting(req, res, next) {
     const { value_json } = validated.data;
     const adminId = req.admin.id;
 
+    if (key === 'matching_settings') {
+      const matchValidation = matchingSettingsSchema.safeParse(value_json);
+      if (!matchValidation.success) {
+        return res.status(400).json({
+          statusCode: 400,
+          error: 'BadRequest',
+          message: matchValidation.error.errors.map((e) => e.message).join(', '),
+        });
+      }
+    }
+
     const result = await pool.query(
       `
       UPDATE app_settings
-      SET value_json = $1::jsonb, updated_by = $2, updated_at = CURRENT_TIMESTAMP
+      SET value_json = CASE WHEN key = 'matching_settings' THEN value_json || $1::jsonb ELSE $1::jsonb END,
+          updated_by = $2,
+          updated_at = CURRENT_TIMESTAMP
       WHERE key = $3
       RETURNING key, value_json;
       `,
@@ -429,6 +454,10 @@ export async function updateSetting(req, res, next) {
         error: 'NotFound',
         message: `Setting key '${key}' does not exist`,
       });
+    }
+
+    if (key === 'matching_settings') {
+      clearMatchingSettingsCache();
     }
 
     logger.info(`Admin [${adminId}] updated setting '${key}'`);
