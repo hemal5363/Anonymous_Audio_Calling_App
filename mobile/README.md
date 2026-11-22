@@ -39,23 +39,13 @@ React Native (Expo) mobile application for the Anonymous Audio Calling platform.
    cp .env.example .env
    ```
 
-2. Find your computer's local LAN IPv4 address:
-   - **Windows:** Run `ipconfig` in PowerShell or Command Prompt. Look for `IPv4 Address` under your active Wi-Fi adapter (e.g. `192.168.1.9`).
-   - **macOS:** Open System Settings $\rightarrow$ Wi-Fi $\rightarrow$ Details, or run `ipconfig getifaddr en0`.
-   - **Linux:** Run `hostname -I` or `ip addr show`.
-
-3. Update `.env` with your computer's LAN IP:
+2. Configure `.env` with your backend server URL (HTTPS only):
    ```env
-   EXPO_PUBLIC_API_URL=http://<YOUR_PC_IP>:3000
-   ```
-   *Example:*
-   ```env
-   EXPO_PUBLIC_API_URL=http://192.168.1.9:3000
+   EXPO_PUBLIC_API_URL=https://anoncall-api.duckdns.org
    ```
 
 > **Note:**
-> - Ensure your backend server is running with `HOST=0.0.0.0` and `PORT=3000` (see `backend/.env`).
-> - Ensure your local firewall (such as Windows Defender Firewall) allows incoming connections on port 3000 for Private networks.
+> - Ensure your backend server is running and accessible.
 
 ---
 
@@ -72,7 +62,7 @@ React Native (Expo) mobile application for the Anonymous Audio Calling platform.
    - **iOS:** Open the native **Camera** app, scan the terminal QR code, and tap the banner to launch inside Expo Go.
 
 3. **Running on Emulators (optional):**
-   - Press `a` in the terminal to launch on a running Android Emulator (uses `10.0.2.2:3000` or LAN IP).
+   - Press `a` in the terminal to launch on a running Android Emulator.
    - Press `i` in the terminal to launch on an iOS Simulator (macOS only).
 
 ---

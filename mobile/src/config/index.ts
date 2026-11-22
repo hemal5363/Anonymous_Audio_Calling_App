@@ -1,6 +1,6 @@
 /**
  * Application Configuration
- * EXPO_PUBLIC_API_URL is loaded automatically by Expo from .env
+ * Server address is strictly read only from EXPO_PUBLIC_API_URL.
+ * No fallback to local loopback or private LAN addresses.
  */
-export const API_URL: string =
-  process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.9:3000';
+export const API_URL: string = process.env.EXPO_PUBLIC_API_URL || '';

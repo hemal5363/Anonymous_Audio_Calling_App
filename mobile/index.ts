@@ -1,3 +1,11 @@
+// Strip or silence console logs in release builds (in addition to babel-plugin-transform-remove-console)
+if (!__DEV__) {
+  console.log = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+  console.warn = () => {};
+}
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';
