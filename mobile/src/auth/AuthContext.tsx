@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { tokenStorage } from './tokenStorage';
 import { api, setOnUnauthorizedCallback } from '../api/client';
 import { connectSocket, disconnectSocket } from '../socket';
+import { unregisterPushToken } from '../push/pushService';
 
 export interface User {
   id: string;
@@ -120,6 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
+      await unregisterPushToken().catch(() => {});
       const refreshToken = await tokenStorage.getRefreshToken();
       if (refreshToken) {
         await api.post('/auth/logout', { refreshToken }).catch(() => {});

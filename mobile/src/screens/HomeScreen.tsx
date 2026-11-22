@@ -11,25 +11,131 @@ import {
   SafeAreaView,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import * as Notifications from 'expo-notifications';
 import { HomeScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
 import { useSocket } from '../socket/useSocket';
 import { connectSocket } from '../socket';
 import { useCall } from '../call/CallContext';
 import { api } from '../api/client';
+import {
+  setupNotificationChannel,
+  checkNotificationPermission,
+  requestNotificationPermission,
+  registerPushToken,
+  handleNotificationData,
+} from '../push/pushService';
 
 export default function HomeScreen() {
   const navigation = useNavigation<HomeScreenNavigationProp>();
   const { user, logout, updateUser } = useAuth();
   const { isConnected, socketError } = useSocket();
-  const { callStatus, startFind, lastEndInfo, clearEndInfo } = useCall();
+  const { callStatus, startFind, lastEndInfo, clearEndInfo, triggerIncomingCall } = useCall();
 
   // Availability state
   const [isAvailable, setIsAvailable] = useState<boolean>(Boolean(user?.is_available));
   const [updatingAvailability, setUpdatingAvailability] = useState<boolean>(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
 
+  // Notification permission state (Home shows small note if denied)
+  const [hasNotificationPermission, setHasNotificationPermission] = useState<boolean>(true);
+
   const [loggingOut, setLoggingOut] = useState<boolean>(false);
+
+  // Initialize push notification channel, permissions, and token management
+  useEffect(() => {
+    let isMounted = true;
+    let tokenSubscription: Notifications.Subscription | null = null;
+    let responseSubscription: Notifications.Subscription | null = null;
+
+    async function initNotifications() {
+      // 1. Ensure channel is ready
+      await setupNotificationChannel();
+
+      // 2. Check current permission
+      const hasPerm = await checkNotificationPermission();
+      if (!hasPerm) {
+        // Ask for permission with explanatory pre-prompt
+        const granted = await requestNotificationPermission();
+        if (isMounted) {
+          setHasNotificationPermission(granted);
+        }
+        if (granted) {
+          await registerPushToken();
+        }
+      } else {
+        if (isMounted) {
+          setHasNotificationPermission(true);
+        }
+        await registerPushToken();
+      }
+
+      // 3. Listen for token refresh / change
+      tokenSubscription = Notifications.addPushTokenListener(() => {
+        registerPushToken().catch(() => {});
+      });
+
+      // 4. Background notification tap listener
+      responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response?.notification?.request?.content?.data;
+        if (data) {
+          handleNotificationData(data, (incoming) => {
+            triggerIncomingCall({
+              callCode: incoming.callCode,
+              sessionId: incoming.sessionId,
+              ringSeconds: incoming.ringSeconds,
+            });
+          });
+        }
+      });
+
+      // 5. Cold start notification response
+      try {
+        const initialResponse = await Notifications.getLastNotificationResponseAsync();
+        if (initialResponse) {
+          const data = initialResponse.notification?.request?.content?.data;
+          if (data) {
+            handleNotificationData(data, (incoming) => {
+              triggerIncomingCall({
+                callCode: incoming.callCode,
+                sessionId: incoming.sessionId,
+                ringSeconds: incoming.ringSeconds,
+              });
+            });
+          }
+        }
+      } catch (err) {
+        // Ignore cold-start lookup errors
+      }
+    }
+
+    if (user) {
+      initNotifications();
+    }
+
+    return () => {
+      isMounted = false;
+      if (tokenSubscription) {
+        tokenSubscription.remove();
+      }
+      if (responseSubscription) {
+        responseSubscription.remove();
+      }
+    };
+  }, [user]);
+
+  const handleRequestNotificationPermission = async () => {
+    const granted = await requestNotificationPermission();
+    setHasNotificationPermission(granted);
+    if (granted) {
+      await registerPushToken();
+    } else {
+      Alert.alert(
+        'Permission Denied',
+        'Incoming calls cannot notify you while the app is closed unless notification permissions are granted in Device Settings.'
+      );
+    }
+  };
 
   // Sync local availability state if context user changes
   useEffect(() => {
@@ -219,6 +325,25 @@ export default function HomeScreen() {
           <View style={styles.errorBanner}>
             <Text style={styles.errorBannerText}>{availabilityError}</Text>
           </View>
+        ) : null}
+
+        {/* Missing Notification Permission Warning */}
+        {!hasNotificationPermission ? (
+          <TouchableOpacity
+            style={styles.notificationWarningCard}
+            onPress={handleRequestNotificationPermission}
+            activeOpacity={0.8}
+          >
+            <View style={styles.notificationWarningHeader}>
+              <Text style={styles.notificationWarningIcon}>🔔</Text>
+              <Text style={styles.notificationWarningTitle}>
+                Notifications Recommended
+              </Text>
+            </View>
+            <Text style={styles.notificationWarningText}>
+              Incoming calls need notification permission to alert you when the app is in the background or closed. Tap to enable.
+            </Text>
+          </TouchableOpacity>
         ) : null}
 
         {/* Availability Card */}
@@ -637,5 +762,32 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#94a3b8',
     lineHeight: 20,
+  },
+  notificationWarningCard: {
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#f59e0b',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 20,
+  },
+  notificationWarningHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  notificationWarningIcon: {
+    fontSize: 18,
+    marginRight: 8,
+  },
+  notificationWarningTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fbbf24',
+  },
+  notificationWarningText: {
+    fontSize: 13,
+    color: '#cbd5e1',
+    lineHeight: 19,
   },
 });

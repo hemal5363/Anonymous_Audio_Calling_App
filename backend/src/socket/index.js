@@ -15,7 +15,7 @@ import {
 } from '../services/call.service.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
-import { pushService, sendIncomingCallPush } from '../services/push.service.js';
+import { pushService, sendIncomingCallPush } from '../services/push.js';
 import {
   startCallBillingTimer,
   stopCallBillingTimer,
@@ -81,6 +81,112 @@ export function initSocketServer(httpServer) {
     socket.join(`user:${userId}`);
 
     logger.debug(`Socket connected [socketId: ${socket.id}]`);
+
+    // Helper to check for a ringing call where this user is the callee
+    const checkAndEmitPendingCall = (ack = null) => {
+      const pendingSession = callSessionManager.getSessionByUserId(userId);
+      if (
+        pendingSession &&
+        pendingSession.calleeId === userId &&
+        pendingSession.status === 'ringing'
+      ) {
+        socket.join(`call:${pendingSession.callCode}`);
+        const elapsedSeconds = Math.floor((Date.now() - pendingSession.requestedAt) / 1000);
+        const remainingSeconds = Math.max(1, 30 - elapsedSeconds);
+
+        const incomingPayload = {
+          sessionId: pendingSession.sessionId,
+          callCode: pendingSession.callCode,
+          ringSeconds: remainingSeconds,
+          role: 'callee',
+        };
+
+        socket.emit(SOCKET_EVENTS.CALL_INCOMING, incomingPayload);
+        logger.debug(`Pending incoming call emitted to callee [callCode: ${pendingSession.callCode}]`);
+
+        if (ack) {
+          ack({
+            success: true,
+            hasPendingCall: true,
+            session: incomingPayload,
+          });
+        }
+        return true;
+      }
+
+      if (ack) {
+        ack({
+          success: true,
+          hasPendingCall: false,
+        });
+      }
+      return false;
+    };
+
+    // Auto-check pending calls on socket connection
+    checkAndEmitPendingCall();
+
+    // Explicit request for pending call: socket.emit('call:pending')
+    socket.on('call:pending', (payload, callback) => {
+      const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
+      checkAndEmitPendingCall(ack);
+    });
+
+    // Socket event to fetch session state by id: socket.emit('call:session:state', { sessionId })
+    socket.on('call:session:state', async (payload, callback) => {
+      const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
+      if (!ack) return;
+
+      const sessionId = payload?.sessionId;
+      if (!sessionId) {
+        return ack({ error: 'sessionId_required' });
+      }
+
+      // Check in-memory session first
+      const memSession = callSessionManager.getSessionById(sessionId);
+      if (memSession) {
+        if (memSession.callerId !== userId && memSession.calleeId !== userId) {
+          return ack({ error: 'Forbidden' });
+        }
+        const elapsed = (Date.now() - memSession.requestedAt) / 1000;
+        const status = memSession.status === 'ringing' && elapsed > 30 ? 'missed' : memSession.status;
+        return ack({ status });
+      }
+
+      // Fallback to database
+      try {
+        const { rows } = await pool.query(
+          `SELECT id, caller_id, callee_id, status, end_reason, requested_at
+           FROM call_sessions
+           WHERE id = $1`,
+          [sessionId]
+        );
+
+        if (rows.length === 0) {
+          return ack({ error: 'Session not found' });
+        }
+
+        const dbSession = rows[0];
+        if (dbSession.caller_id !== userId && dbSession.callee_id !== userId) {
+          return ack({ error: 'Forbidden' });
+        }
+
+        let status = dbSession.status;
+        if (status === 'ringing') {
+          const elapsed = (Date.now() - new Date(dbSession.requested_at).getTime()) / 1000;
+          status = elapsed > 30 ? 'missed' : 'ringing';
+        } else if (status === 'missed' || dbSession.end_reason === 'ring_timeout') {
+          status = 'missed';
+        } else {
+          status = 'ended';
+        }
+
+        return ack({ status });
+      } catch (err) {
+        logger.error('Error fetching session state via socket:', err.message);
+        return ack({ error: 'server_error' });
+      }
+    });
 
     // -----------------------------------------------------------------------
     // 1. Presence & Setup
@@ -188,7 +294,6 @@ export function initSocketServer(httpServer) {
           callCode: session.callCode,
           status: session.status,
           role: 'caller',
-          iceServers: config.webrtc.getIceServers(),
         };
 
         socket.emit(SOCKET_EVENTS.CALL_RINGING, callerPayload);
@@ -207,13 +312,16 @@ export function initSocketServer(httpServer) {
             callCode: session.callCode,
             ringSeconds: 30,
             role: 'callee',
-            iceServers: config.webrtc.getIceServers(),
           });
           logger.debug(`Incoming emitted [callCode: ${session.callCode}]`);
         } else {
           // Callee has no active socket connection -> wake up via push notification
           logger.debug(`Push dispatched for offline callee [sessionId: ${session.id}]`);
-          await pushService.sendIncomingCallPush(callee.pushToken, session.id);
+          try {
+            await pushService.sendIncomingCallPush(callee.pushToken, session.id);
+          } catch (pushErr) {
+            logger.error(`[Push Service] Error dispatching push for session ${session.id}:`, pushErr.message);
+          }
         }
 
         if (ack) {
@@ -222,7 +330,6 @@ export function initSocketServer(httpServer) {
             sessionId: session.id,
             callCode: session.callCode,
             status: session.status,
-            iceServers: config.webrtc.getIceServers(),
           });
         }
       } catch (err) {

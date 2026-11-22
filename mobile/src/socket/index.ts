@@ -184,6 +184,13 @@ export function getSocket(): Socket | null {
 }
 
 /**
+ * Returns current socket connection status
+ */
+export function isSocketConnectedState(): boolean {
+  return Boolean(isSocketConnected && socketInstance?.connected);
+}
+
+/**
  * Disconnects and resets socket instance cleanly
  */
 export function disconnectSocket(): void {

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getCallHistory } from '../controllers/user.controller.js';
+import { getCallHistory, getSessionById } from '../controllers/user.controller.js';
 import { authenticateUser } from '../middleware/auth.middleware.js';
 
 const router = Router();
@@ -9,5 +9,10 @@ router.use(authenticateUser);
 
 // 4.1 Get Call History
 router.get('/history', getCallHistory);
+
+// 4.2 Query Session State (for Push Notification tap / cold start)
+router.get('/session/:sessionId', getSessionById);
+router.get('/:sessionId', getSessionById);
+router.get('/:sessionId/state', getSessionById);
 
 export default router;

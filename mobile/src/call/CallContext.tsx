@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useRef } from 'react';
+import { Alert } from 'react-native';
 import { useSocket } from '../socket/useSocket';
 import { SOCKET_EVENTS } from '../socket';
 import { getAudioEngine } from './AudioEngine';
@@ -51,6 +52,7 @@ interface CallContextType {
   reportPeer: (reason: string, note?: string) => Promise<void>;
   blockPeer: () => Promise<void>;
   clearEndInfo: () => void;
+  triggerIncomingCall: (incoming: IncomingCallAlert) => void;
 }
 
 const CallContext = createContext<CallContextType | undefined>(undefined);
@@ -155,7 +157,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setCallStatus('ringing');
     };
 
-    // 3. Matched & Connected (Both peers)
+    // 3. Matched & Initiating PeerConnection (Both peers)
     const handleMatched = async (payload: any) => {
       const active: ActiveCall = {
         callCode: payload.callCode,
@@ -166,11 +168,66 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
       setCurrentCall(active);
       setIncomingCall(null);
-      setCallStatus('connected');
-      startDurationTimer();
 
-      // Initialize AudioEngine contract with ephemeral ICE servers
-      await audioEngine.initialize(active.iceServers || []);
+      // Register listener for local ICE candidates to relay to peer via signaling
+      audioEngine.onIceCandidate((candidate) => {
+        if (socket && active.callCode) {
+          socket.emit(SOCKET_EVENTS.SIGNAL_ICE, {
+            callCode: active.callCode,
+            candidate,
+          });
+        }
+      });
+
+      // Register connection state changes
+      audioEngine.onConnectionStateChange((state) => {
+        if (state === 'connected') {
+          // Transition to connected and start timer ONLY when peer connection is connected
+          setCallStatus('connected');
+          startDurationTimer();
+          // Notify server of active WebRTC audio connection state
+          socket.emit(SOCKET_EVENTS.CALL_CONNECTED, { callCode: active.callCode });
+        } else if (state === 'failed') {
+          stopDurationTimer();
+          audioEngine.cleanup();
+          setLastEndInfo({
+            callCode: active.callCode,
+            reason: 'network_error',
+            friendlyMessage: 'Call ended: Audio connection failed to establish.',
+          });
+          setCurrentCall(null);
+          setIncomingCall(null);
+          setCallStatus('ended');
+          socket.emit(SOCKET_EVENTS.CALL_END, {
+            callCode: active.callCode,
+            reason: 'network_error',
+          });
+        } else if (state === 'disconnected') {
+          console.warn('[CallContext] WebRTC audio connection disconnected');
+        }
+      });
+
+      // Initialize AudioEngine with ephemeral ICE servers
+      try {
+        await audioEngine.initialize(active.iceServers || []);
+      } catch (err: any) {
+        console.error('[CallContext] AudioEngine initialize failed:', err);
+        stopDurationTimer();
+        audioEngine.cleanup();
+        setLastEndInfo({
+          callCode: active.callCode,
+          reason: 'permission_denied',
+          friendlyMessage: err?.message || 'Failed to initialize microphone or permission denied.',
+        });
+        setCurrentCall(null);
+        setIncomingCall(null);
+        setCallStatus('ended');
+        socket.emit(SOCKET_EVENTS.CALL_END, {
+          callCode: active.callCode,
+          reason: 'caller_hangup',
+        });
+        return;
+      }
 
       // If caller: generate and emit WebRTC offer
       if (active.role === 'caller') {
@@ -182,9 +239,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
           });
         }
       }
-
-      // Notify server of WebRTC audio connection state
-      socket.emit(SOCKET_EVENTS.CALL_CONNECTED, { callCode: active.callCode });
     };
 
     // 4. WebRTC Signaling Relays
@@ -335,11 +389,23 @@ export function CallProvider({ children }: { children: ReactNode }) {
   // Public Action Handlers
   // -------------------------------------------------------------------------
 
-  const startFind = () => {
+  const startFind = async () => {
     if (!socket || !isConnected) {
       console.warn('[CallContext] startFind called but socket is not connected.');
       return;
     }
+
+    // Request microphone permission before starting a call
+    const hasPermission = await audioEngine.requestPermissions();
+    if (!hasPermission) {
+      Alert.alert(
+        'Microphone Permission Required',
+        'Microphone access is required to connect voice calls. Please allow microphone permission in your device settings.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     setLastEndInfo(null);
     setCallStatus('searching');
     socket.emit(SOCKET_EVENTS.CALL_FIND, (ack: any) => {
@@ -371,8 +437,20 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setCallStatus('idle');
   };
 
-  const acceptIncoming = () => {
+  const acceptIncoming = async () => {
     if (!incomingCall?.callCode || !socket) return;
+
+    // Request microphone permission before accepting incoming call
+    const hasPermission = await audioEngine.requestPermissions();
+    if (!hasPermission) {
+      Alert.alert(
+        'Microphone Permission Required',
+        'Microphone access is required to answer voice calls. Please allow microphone permission in your device settings.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     socket.emit(SOCKET_EVENTS.CALL_ACCEPT, {
       callCode: incomingCall.callCode,
     });
@@ -472,6 +550,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setCallStatus('idle');
   };
 
+  const triggerIncomingCall = (incoming: IncomingCallAlert) => {
+    setIncomingCall(incoming);
+    setCallStatus('incoming');
+  };
+
   return (
     <CallContext.Provider
       value={{
@@ -493,6 +576,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         reportPeer,
         blockPeer,
         clearEndInfo,
+        triggerIncomingCall,
       }}
     >
       {children}

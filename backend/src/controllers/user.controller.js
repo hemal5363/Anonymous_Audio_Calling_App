@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { callSessionManager } from '../socket/callSessionManager.js';
 
 // Validation Schemas
 const availabilitySchema = z.object({
@@ -112,6 +113,34 @@ export async function savePushToken(req, res, next) {
 
     return res.status(200).json({
       message: 'Push token registered successfully',
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 3.2b Remove Push Token (on logout)
+ * DELETE /user/push-token
+ */
+export async function removePushToken(req, res, next) {
+  try {
+    const userId = req.user.id;
+
+    await pool.query(
+      `
+      UPDATE users
+      SET push_token = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1;
+      `,
+      [userId]
+    );
+
+    logger.info(`Push token removed for user: [ID: ${userId}]`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Push token removed successfully',
     });
   } catch (error) {
     next(error);
@@ -437,6 +466,71 @@ export async function getCallHistory(req, res, next) {
         limit,
         totalPages: Math.ceil(total / limit) || 1,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 4.2 Query Call Session State (for Incoming Push Notification Wake-Up & State Checks)
+ * GET /calls/session/:sessionId
+ * Returns only if the requester is the caller or callee of the session,
+ * and returns only the status field ('ringing', 'ended', 'missed').
+ */
+export async function getSessionById(req, res, next) {
+  try {
+    const { sessionId } = req.params;
+    const userId = req.user.id;
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'sessionId is required' });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT id, call_code, caller_id, callee_id, status, end_reason, requested_at, created_at
+      FROM call_sessions
+      WHERE id = $1;
+      `,
+      [sessionId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const session = rows[0];
+
+    // Strictly ensure requester is caller or callee
+    if (session.caller_id !== userId && session.callee_id !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Determine normalized status: ringing, ended, or missed
+    const memSession =
+      callSessionManager.getSession(session.call_code) ||
+      callSessionManager.getSessionById(session.id);
+    const activeStatus = memSession ? memSession.status : session.status;
+
+    let normalizedStatus;
+    if (activeStatus === 'ringing') {
+      const requestedTime = memSession?.requestedAt || new Date(session.requested_at).getTime();
+      const elapsedSeconds = (Date.now() - requestedTime) / 1000;
+      if (elapsedSeconds > 30) {
+        normalizedStatus = 'missed';
+      } else {
+        normalizedStatus = 'ringing';
+      }
+    } else if (activeStatus === 'missed' || session.end_reason === 'ring_timeout') {
+      normalizedStatus = 'missed';
+    } else {
+      normalizedStatus = 'ended';
+    }
+
+    // Return only the status field
+    return res.status(200).json({
+      status: normalizedStatus,
     });
   } catch (error) {
     next(error);

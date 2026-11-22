@@ -3,6 +3,7 @@ import {
   getMe,
   toggleAvailability,
   savePushToken,
+  removePushToken,
   blockUser,
   getBlockedUsers,
   unblockUser,
@@ -23,8 +24,9 @@ router.get('/profile', getMe);
 // 3.1 Toggle Availability
 router.put('/availability', toggleAvailability);
 
-// 3.2 Save Push Token
+// 3.2 Save & Remove Push Token
 router.post('/push-token', savePushToken);
+router.delete('/push-token', removePushToken);
 
 // 3.3 Block User
 router.post('/blocks', blockUser);

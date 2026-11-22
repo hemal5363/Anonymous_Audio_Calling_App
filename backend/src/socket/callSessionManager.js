@@ -10,6 +10,8 @@ class CallSessionManager {
     this.sessionsByCode = new Map();
     // Map of userId -> session object (for quick disconnect & busy lookups)
     this.sessionsByUser = new Map();
+    // Map of sessionId -> session object (for quick push notification state lookups)
+    this.sessionsById = new Map();
   }
 
   /**
@@ -47,6 +49,9 @@ class CallSessionManager {
     this.sessionsByCode.set(callCode, session);
     this.sessionsByUser.set(callerId, session);
     this.sessionsByUser.set(calleeId, session);
+    if (sessionId) {
+      this.sessionsById.set(sessionId, session);
+    }
 
     return session;
   }
@@ -56,6 +61,13 @@ class CallSessionManager {
    */
   getSession(callCode) {
     return this.sessionsByCode.get(callCode) || null;
+  }
+
+  /**
+   * Get session by sessionId
+   */
+  getSessionById(sessionId) {
+    return this.sessionsById.get(sessionId) || null;
   }
 
   /**
@@ -144,6 +156,9 @@ class CallSessionManager {
     this.sessionsByCode.delete(callCode);
     this.sessionsByUser.delete(session.callerId);
     this.sessionsByUser.delete(session.calleeId);
+    if (session.sessionId) {
+      this.sessionsById.delete(session.sessionId);
+    }
 
     return session;
   }
@@ -157,6 +172,7 @@ class CallSessionManager {
     }
     this.sessionsByCode.clear();
     this.sessionsByUser.clear();
+    this.sessionsById.clear();
   }
 }
 
