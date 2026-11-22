@@ -1,10 +1,12 @@
 import { jest, describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from '@jest/globals';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import request from 'supertest';
 import { io as ioClient } from 'socket.io-client';
 import app from '../src/app.js';
 import { pool } from '../src/db/index.js';
 import { config } from '../src/config/index.js';
+import { logger } from '../src/utils/logger.js';
 import { initSocketServer, userSocketMap, callSessionManager, SOCKET_EVENTS } from '../src/socket/index.js';
 import { generateAccessToken } from '../src/utils/token.js';
 
@@ -107,6 +109,140 @@ describe('ICE Server Config & Isolation (STUN/TURN Ephemeral Credentials)', () =
       // Distinct calls have distinct credentials
       expect(turnA.username).not.toBe(turnB.username);
       expect(turnA.credential).not.toBe(turnB.credential);
+    });
+
+    it('should match coturn use-auth-secret scheme with turn:anoncall-api.duckdns.org:3478 and independent HMAC verification', () => {
+      process.env.STUN_URLS = 'stun:stun.l.google.com:19302';
+      process.env.TURN_URL = 'turn:anoncall-api.duckdns.org:3478';
+      const secret = 'prod_shared_turn_secret_xyz_987';
+      process.env.TURN_SECRET = secret;
+      delete process.env.TURN_TTL; // Default should be 3600
+
+      const callCode = 'anon-session-777';
+      const servers = config.webrtc.getIceServers({ callCode });
+
+      // Check STUN
+      const stun = servers.find((s) => s.urls === 'stun:stun.l.google.com:19302' || (Array.isArray(s.urls) && s.urls.includes('stun:stun.l.google.com:19302')));
+      expect(stun).toBeDefined();
+
+      // Check TURN
+      const turn = servers.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      expect(turn).toBeDefined();
+      expect(turn.urls).toEqual(['turn:anoncall-api.duckdns.org:3478']);
+
+      // Check username: Unix timestamp in seconds + ":" + anonymous id
+      const parts = turn.username.split(':');
+      expect(parts.length).toBeGreaterThanOrEqual(2);
+      const timestampSec = parseInt(parts[0], 10);
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      // Expiry must be integer timestamp around 1 hour (3600 seconds) in the future
+      expect(timestampSec).toBeGreaterThanOrEqual(nowSec + 3590);
+      expect(timestampSec).toBeLessThanOrEqual(nowSec + 3610);
+      expect(parts.slice(1).join(':')).toBe(callCode);
+
+      // Independent HMAC-SHA1 recomputation check
+      const independentlyComputedHmac = crypto
+        .createHmac('sha1', secret)
+        .update(turn.username)
+        .digest('base64');
+
+      expect(turn.credential).toBe(independentlyComputedHmac);
+    });
+
+    it('should support coturn timestamp-only username format when includeAnonymousId is false', () => {
+      process.env.TURN_URL = 'turn:anoncall-api.duckdns.org:3478';
+      const secret = 'standalone_secret_key';
+      process.env.TURN_SECRET = secret;
+
+      const servers = config.webrtc.getIceServers({ includeAnonymousId: false });
+      const turn = servers.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      expect(turn).toBeDefined();
+
+      // Username is purely numeric Unix timestamp
+      expect(turn.username).toMatch(/^\d+$/);
+      const nowSec = Math.floor(Date.now() / 1000);
+      const timestampSec = parseInt(turn.username, 10);
+      expect(timestampSec).toBeGreaterThanOrEqual(nowSec + 3590);
+
+      // Independent HMAC-SHA1 verification
+      const expectedHmac = crypto
+        .createHmac('sha1', secret)
+        .update(turn.username)
+        .digest('base64');
+      expect(turn.credential).toBe(expectedHmac);
+    });
+
+    it('CRITICAL PRIVACY: should never embed real user ID, email, or phone number in TURN username', () => {
+      process.env.TURN_URL = 'turn:anoncall-api.duckdns.org:3478';
+      process.env.TURN_SECRET = 'privacy_test_secret';
+
+      const secretUserId = 'user-uuid-11223344-sensitive';
+      const userEmail = 'alice.personal@example.com';
+      const userPhone = '+1-555-867-5309';
+
+      // 1. Caller attempts to pass userId property
+      const servers1 = config.webrtc.getIceServers({ userId: secretUserId, callCode: 'clean-call-id' });
+      const turn1 = servers1.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      expect(turn1.username).not.toContain(secretUserId);
+      expect(turn1.username).toContain('clean-call-id');
+
+      // 2. Someone maliciously or inadvertently passes email as identifier
+      const servers2 = config.webrtc.getIceServers({ callCode: userEmail });
+      const turn2 = servers2.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      expect(turn2.username).not.toContain(userEmail);
+      expect(turn2.username).not.toContain('@');
+      // Replaced with a random UUID token
+      expect(turn2.username.split(':')[1]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+      // 3. Someone passes phone number as identifier
+      const servers3 = config.webrtc.getIceServers({ anonymousId: userPhone });
+      const turn3 = servers3.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      expect(turn3.username).not.toContain(userPhone);
+      expect(turn3.username).not.toContain('+1');
+      expect(turn3.username.split(':')[1]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+      // Independent HMAC matches the sanitized username
+      const expectedHmac3 = crypto
+        .createHmac('sha1', 'privacy_test_secret')
+        .update(turn3.username)
+        .digest('base64');
+      expect(turn3.credential).toBe(expectedHmac3);
+    });
+
+    it('SECURITY: should NEVER log credentials, TURN secrets, or sensitive ICE payloads', () => {
+      const secret = 'super_confidential_turn_secret_never_log_me';
+      process.env.TURN_URL = 'turn:anoncall-api.duckdns.org:3478';
+      process.env.TURN_SECRET = secret;
+
+      const servers = config.webrtc.getIceServers({ callCode: 'call-999' });
+      const turn = servers.find((s) => Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478'));
+      const generatedCredential = turn.credential;
+
+      const loggedMessages = [];
+      const spyStdout = jest.spyOn(process.stdout, 'write').mockImplementation((str) => {
+        loggedMessages.push(String(str));
+        return true;
+      });
+      const spyConsoleLog = jest.spyOn(console, 'log').mockImplementation((...args) => {
+        loggedMessages.push(args.map(String).join(' '));
+      });
+
+      // Pass iceServers directly into logger
+      logger.info('Call setup with ICE servers', { iceServers: servers, testKey: 'ok' });
+      logger.debug('Generated ICE credentials', { credential: generatedCredential, turnSecret: secret });
+
+      spyStdout.mockRestore();
+      spyConsoleLog.mockRestore();
+
+      const combinedLogs = loggedMessages.join('\n');
+
+      // Assert secret is NEVER in logs
+      expect(combinedLogs).not.toContain(secret);
+      // Assert raw credential is NEVER in logs
+      expect(combinedLogs).not.toContain(generatedCredential);
+      // Assert redaction is applied
+      expect(combinedLogs).toContain('[REDACTED]');
     });
 
     it('should support optional static TURN credentials when TURN_USERNAME and TURN_PASSWORD are set without secret', () => {
@@ -425,6 +561,50 @@ describe('ICE Server Config & Isolation (STUN/TURN Ephemeral Credentials)', () =
       callerSocket.on('connect', onConnect);
       calleeSocket.on('connect', onConnect);
       eavesdropperSocket.on('connect', onConnect);
+    });
+
+    it('should expose GET /calls/turn-credentials returning ICE servers with valid HMAC credentials for authenticated users', async () => {
+      const user = createTestUser('turn_requester');
+      const token = generateAccessToken(user);
+
+      process.env.TURN_URL = 'turn:anoncall-api.duckdns.org:3478';
+      const secret = 'rest_endpoint_test_turn_secret_456';
+      process.env.TURN_SECRET = secret;
+
+      // 1. Unauthenticated request must return 401
+      const unauthRes = await request(app).get('/calls/turn-credentials');
+      expect(unauthRes.status).toBe(401);
+
+      // 2. Authenticated request returns 200 with ICE servers
+      const authRes = await request(app)
+        .get('/calls/turn-credentials')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(authRes.status).toBe(200);
+      expect(authRes.body.ttl).toBe(3600);
+      expect(Array.isArray(authRes.body.iceServers)).toBe(true);
+
+      const stun = authRes.body.iceServers.find((s) =>
+        typeof s.urls === 'string' ? s.urls.startsWith('stun:') : Array.isArray(s.urls) && s.urls[0].startsWith('stun:')
+      );
+      expect(stun).toBeDefined();
+
+      const turn = authRes.body.iceServers.find((s) =>
+        Array.isArray(s.urls) && s.urls.includes('turn:anoncall-api.duckdns.org:3478')
+      );
+      expect(turn).toBeDefined();
+      expect(turn.urls).toEqual(['turn:anoncall-api.duckdns.org:3478']);
+
+      // Recompute HMAC independently and verify
+      const expectedHmac = crypto
+        .createHmac('sha1', secret)
+        .update(turn.username)
+        .digest('base64');
+      expect(turn.credential).toBe(expectedHmac);
+
+      // Ensure no PII in username
+      expect(turn.username).not.toContain(user.id);
+      expect(turn.username).not.toContain(user.email);
     });
   });
 });

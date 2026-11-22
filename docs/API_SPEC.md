@@ -514,19 +514,18 @@ Generates short-lived HMAC time-limited coturn server credentials for WebRTC pee
   "iceServers": [
     {
       "urls": [
-        "stun:stun.yourdomain.com:3478"
+        "stun:stun.l.google.com:19302"
       ]
     },
     {
       "urls": [
-        "turn:turn.yourdomain.com:3478?transport=udp",
-        "turn:turn.yourdomain.com:3478?transport=tcp"
+        "turn:anoncall-api.duckdns.org:3478"
       ],
       "username": "1732190400:e0b1f2e3-4c5d-6e7f-8a9b-0c1d2e3f4a5b",
       "credential": "computed_hmac_secret_token"
     }
   ],
-  "ttl": 86400
+  "ttl": 3600
 }
 ```
 - **Error Codes:**
@@ -1093,13 +1092,12 @@ All client-emitted events require an authenticated socket connection (`auth: { t
   "sessionId": "b4e803db-07ab-4328-91c6-258ca867ef41",
   "role": "caller", // or "callee"
   "iceServers": [
-    { "urls": "stun:stun.yourdomain.com:3478" },
+    { "urls": "stun:stun.l.google.com:19302" },
     {
       "urls": [
-        "turn:turn.yourdomain.com:3478?transport=udp",
-        "turn:turn.yourdomain.com:3478?transport=tcp"
+        "turn:anoncall-api.duckdns.org:3478"
       ],
-      "username": "1732190400:ephemeral_user",
+      "username": "1732190400:ephemeral_session_token",
       "credential": "computed_hmac_secret"
     }
   ]

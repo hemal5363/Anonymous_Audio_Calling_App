@@ -20,14 +20,14 @@ const envSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET is required and must be at least 32 characters long'),
   STUN_URLS: z.string().default('stun:stun.l.google.com:19302'),
   STUN_SERVER_URL: z.string().optional(),
-  TURN_URL: z.string().optional(),
+  TURN_URL: z.string().default('turn:anoncall-api.duckdns.org:3478'),
   TURN_SERVER_URL: z.string().optional(),
   TURN_SERVER_TCP_URL: z.string().optional(),
   TURN_USERNAME: z.string().optional(),
   TURN_PASSWORD: z.string().optional(),
   TURN_CREDENTIAL: z.string().optional(),
   TURN_SECRET: z.string().optional(),
-  TURN_TTL: z.coerce.number().default(86400),
+  TURN_TTL: z.coerce.number().default(3600),
   ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5173,http://127.0.0.1:5173'),
   EXPO_DEV_ORIGIN: z.string().default('http://localhost:8081,http://127.0.0.1:8081'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
@@ -105,10 +105,12 @@ export const config = {
       );
     },
     get turnUrl() {
+      if (process.env.TURN_URL !== undefined) {
+        return process.env.TURN_URL;
+      }
       return (
-        process.env.TURN_URL ||
         process.env.TURN_SERVER_URL ||
-        ''
+        (process.env.NODE_ENV === 'test' ? '' : 'turn:anoncall-api.duckdns.org:3478')
       );
     },
     get turnUsername() {
@@ -125,9 +127,9 @@ export const config = {
       return process.env.TURN_SECRET || '';
     },
     get turnTtl() {
-      return process.env.TURN_TTL ? Number(process.env.TURN_TTL) : 86400;
+      return process.env.TURN_TTL ? Number(process.env.TURN_TTL) : 3600;
     },
-    getIceServers({ callCode, userId } = {}) {
+    getIceServers({ callCode, anonymousId, includeAnonymousId = true } = {}) {
       const iceServers = [];
 
       // 1. STUN Servers (default Google public STUN)
@@ -161,11 +163,25 @@ export const config = {
         const turnPassword = this.turnPassword;
 
         if (turnSecret) {
-          // Ephemeral short-lived credentials generated per call (Coturn standard HMAC-SHA1)
+          // Ephemeral short-lived credentials generated per call (Coturn standard use-auth-secret REST API)
           const ttl = this.turnTtl;
           const expiry = Math.floor(Date.now() / 1000) + ttl;
-          const identifier = callCode || userId || turnUsername || 'user';
-          const username = `${expiry}:${identifier}`;
+
+          let username;
+          if (!includeAnonymousId) {
+            username = String(expiry);
+          } else {
+            // Anonymized identifier: NEVER a real user ID, email, or phone
+            let anonToken = anonymousId || callCode;
+            const isEmail = typeof anonToken === 'string' && anonToken.includes('@');
+            const isPhone = typeof anonToken === 'string' && /^(\+?\d[\d\s\-()]{6,}\d)$/.test(anonToken.trim());
+
+            if (!anonToken || isEmail || isPhone) {
+              anonToken = crypto.randomUUID();
+            }
+            username = `${expiry}:${anonToken}`;
+          }
+
           const credential = crypto
             .createHmac('sha1', turnSecret)
             .update(username)

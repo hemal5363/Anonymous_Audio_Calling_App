@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { config } from '../config/index.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
 
@@ -587,6 +588,19 @@ export async function getSessionById(req, res, next) {
   } catch (error) {
     next(error);
   }
+}
+
+/**
+ * 4.3 Get Ephemeral TURN / ICE Credentials
+ * GET /calls/turn-credentials
+ * Generates short-lived HMAC time-limited coturn server credentials for WebRTC peer connection relay.
+ */
+export function getTurnCredentials(req, res) {
+  const iceServers = config.webrtc.getIceServers();
+  return res.status(200).json({
+    iceServers,
+    ttl: config.webrtc.turnTtl,
+  });
 }
 
 /**

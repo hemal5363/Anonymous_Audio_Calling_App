@@ -12,7 +12,7 @@ function getActiveLogLevel() {
   return LOG_LEVELS[envLevel] !== undefined ? LOG_LEVELS[envLevel] : LOG_LEVELS.info;
 }
 
-const SENSITIVE_KEYS = /password|token|secret|authorization|otp|push_token|credential/i;
+const SENSITIVE_KEYS = /password|token|secret|authorization|otp|push_token|credential|iceServers|ice_servers|turn_secret/i;
 
 function sanitizeMeta(meta, depth = 0) {
   if (depth > 4 || meta === null || meta === undefined) return meta;

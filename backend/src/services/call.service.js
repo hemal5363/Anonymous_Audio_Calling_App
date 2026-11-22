@@ -36,7 +36,7 @@ export async function acceptCall({ callCode, calleeId }) {
       sessionId: rows[0].id,
       callerId: rows[0].caller_id,
       calleeId: rows[0].callee_id,
-      iceServers: config.webrtc.getIceServers({ callCode, userId: calleeId }),
+      iceServers: config.webrtc.getIceServers({ callCode }),
     };
   }
 
@@ -68,7 +68,7 @@ export async function acceptCall({ callCode, calleeId }) {
     sessionId: session.sessionId,
     callerId: session.callerId,
     calleeId: session.calleeId,
-    iceServers: config.webrtc.getIceServers({ callCode, userId: calleeId }),
+    iceServers: config.webrtc.getIceServers({ callCode }),
   };
 }
 
