@@ -52,6 +52,19 @@ module.exports = {
             'Allow Anonymous Audio Calling to access your microphone for anonymous audio calls.',
         },
       ],
+      [
+        'expo-build-properties',
+        {
+          android: {
+            enableProguardInReleaseBuilds: true,
+            extraProguardRules:
+              '-keep class org.webrtc.** { *; }\n' +
+              '-dontwarn org.webrtc.**\n' +
+              '-keep class com.oney.WebRTCModule.** { *; }\n' +
+              '-dontwarn com.oney.WebRTCModule.**',
+          },
+        },
+      ],
     ],
     extra: {
       eas: {
