@@ -402,7 +402,7 @@ describe('Admin Authorization & Endpoints', () => {
       expect(res.body.message).toContain('cannot be identical');
     });
 
-    it('successfully changes password when complying with strong policy', async () => {
+    it('successfully changes password and revokes existing admin refresh tokens', async () => {
       const currentPass = 'CurrentValidPassword123!';
       const newPass = 'BrandNewValidPassword456!';
       const hash = await bcrypt.hash(currentPass, 10);
@@ -414,7 +414,9 @@ describe('Admin Authorization & Endpoints', () => {
         .mockResolvedValueOnce({
           rows: [{ id: mockAdmin.id, password_hash: hash }],
         })
-        .mockResolvedValueOnce({ rowCount: 1 }); // UPDATE query
+        .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE admin_users password_hash
+        .mockResolvedValueOnce({ rowCount: 2 }) // UPDATE admin_refresh_tokens revoked_at
+        .mockResolvedValueOnce({ rowCount: 0 }); // UPDATE refresh_tokens revoked_at
 
       const res = await request(app)
         .patch('/admin/auth/password')
@@ -424,6 +426,82 @@ describe('Admin Authorization & Endpoints', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.message).toContain('updated successfully');
+
+      // Assert that admin_refresh_tokens were explicitly revoked for this adminId
+      expect(querySpy).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE admin_refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE admin_id = $1'),
+        [mockAdmin.id]
+      );
+    });
+  });
+
+  describe('POST /admin/auth/refresh (Admin Session Management)', () => {
+    it('returns 400 when refreshToken is missing', async () => {
+      const res = await request(app).post('/admin/auth/refresh').send({});
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('refreshToken is required');
+    });
+
+    it('returns 401 when refreshToken is invalid or malformed', async () => {
+      const res = await request(app)
+        .post('/admin/auth/refresh')
+        .send({ refreshToken: 'malformed.token.here' });
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects revoked admin refresh token with 401', async () => {
+      const { generateRefreshToken, hashToken } = await import('../src/utils/token.js');
+      const refreshToken = generateRefreshToken({ id: mockAdmin.id });
+      const tokenHash = hashToken(refreshToken);
+
+      querySpy.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'revoked-token-uuid',
+            admin_id: mockAdmin.id,
+            expires_at: new Date(Date.now() + 86400000),
+            revoked_at: new Date(), // Already revoked
+          },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/admin/auth/refresh')
+        .send({ refreshToken });
+
+      expect(res.status).toBe(401);
+      expect(res.body.message).toContain('revoked');
+    });
+
+    it('rotates and refreshes admin token when valid active refresh token is provided', async () => {
+      const { generateRefreshToken, hashToken } = await import('../src/utils/token.js');
+      const refreshToken = generateRefreshToken({ id: mockAdmin.id });
+      const tokenHash = hashToken(refreshToken);
+
+      querySpy
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'active-token-uuid',
+              admin_id: mockAdmin.id,
+              expires_at: new Date(Date.now() + 86400000),
+              revoked_at: null,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE admin_refresh_tokens (revoke current)
+        .mockResolvedValueOnce({
+          rows: [{ id: mockAdmin.id, email: mockAdmin.email, role: 'superadmin', is_active: true }],
+        }) // SELECT admin_users
+        .mockResolvedValueOnce({ rowCount: 1 }); // INSERT new admin_refresh_tokens
+
+      const res = await request(app)
+        .post('/admin/auth/refresh')
+        .send({ refreshToken });
+
+      expect(res.status).toBe(200);
+      expect(res.body.token).toBeDefined();
+      expect(res.body.refreshToken).toBeDefined();
     });
   });
 

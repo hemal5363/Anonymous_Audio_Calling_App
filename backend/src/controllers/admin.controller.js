@@ -2,7 +2,7 @@ import bcrypt from 'bcrypt';
 import { z } from 'zod';
 import { pool } from '../db/index.js';
 import { config } from '../config/index.js';
-import { generateAdminToken } from '../utils/token.js';
+import { generateAdminToken, generateRefreshToken, verifyRefreshToken, hashToken } from '../utils/token.js';
 import { logger } from '../utils/logger.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
@@ -179,6 +179,20 @@ export async function adminLogin(req, res, next) {
     );
 
     const token = generateAdminToken(admin);
+    const refreshToken = generateRefreshToken({ id: admin.id });
+    const tokenHash = hashToken(refreshToken);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+    try {
+      await pool.query(
+        `INSERT INTO admin_refresh_tokens (admin_id, token_hash, expires_at)
+         VALUES ($1, $2, $3);`,
+        [admin.id, tokenHash, expiresAt]
+      );
+    } catch (tokenErr) {
+      logger.warn('Failed to persist admin refresh token:', tokenErr.message);
+    }
+
     logger.info(`Admin logged in successfully: [ID: ${admin.id}, Email: ${admin.email}, Role: ${admin.role}]`);
 
     return res.status(200).json({
@@ -188,6 +202,7 @@ export async function adminLogin(req, res, next) {
         role: admin.role,
       },
       token,
+      refreshToken,
     });
   } catch (error) {
     next(error);
@@ -198,6 +213,7 @@ export async function adminLogin(req, res, next) {
  * 6.1b Change Admin Password
  * PATCH /admin/auth/password
  * Strictly enforces strong password policy: >= 12 chars, uppercase, lowercase, number, special char
+ * Automatically revokes all existing active admin refresh tokens upon password change
  */
 export async function changeAdminPassword(req, res, next) {
   try {
@@ -252,11 +268,106 @@ export async function changeAdminPassword(req, res, next) {
       [newHash, adminId]
     );
 
-    logger.info(`Admin [${adminId}] password successfully updated according to strong password policy.`);
+    // Revoke all existing admin refresh tokens upon password change
+    await pool.query(
+      'UPDATE admin_refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE admin_id = $1 AND revoked_at IS NULL;',
+      [adminId]
+    );
+
+    await pool.query(
+      'UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND revoked_at IS NULL;',
+      [adminId]
+    ).catch(() => {});
+
+    logger.info(`Admin [${adminId}] password successfully updated and existing refresh tokens revoked.`);
 
     return res.status(200).json({
       success: true,
       message: 'Admin password updated successfully',
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 6.1c Admin Refresh Token
+ * POST /admin/auth/refresh
+ */
+export async function adminRefreshToken(req, res, next) {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: 'refreshToken is required',
+      });
+    }
+
+    let payload;
+    try {
+      payload = verifyRefreshToken(refreshToken);
+    } catch (err) {
+      return res.status(401).json({
+        statusCode: 401,
+        error: 'Unauthorized',
+        message: 'Invalid or expired refresh token',
+      });
+    }
+
+    const adminId = payload.userId || payload.adminId || payload.id;
+    const tokenHash = hashToken(refreshToken);
+
+    const { rows } = await pool.query(
+      `SELECT id, admin_id, expires_at, revoked_at
+       FROM admin_refresh_tokens
+       WHERE token_hash = $1 AND admin_id = $2;`,
+      [tokenHash, adminId]
+    );
+
+    if (rows.length === 0 || rows[0].revoked_at || new Date(rows[0].expires_at) < new Date()) {
+      return res.status(401).json({
+        statusCode: 401,
+        error: 'Unauthorized',
+        message: 'Refresh token has been revoked or expired',
+      });
+    }
+
+    // Revoke old refresh token (rotation)
+    await pool.query(
+      'UPDATE admin_refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = $1;',
+      [rows[0].id]
+    );
+
+    const { rows: adminRows } = await pool.query(
+      'SELECT id, email, role, is_active FROM admin_users WHERE id = $1;',
+      [adminId]
+    );
+
+    if (adminRows.length === 0 || !adminRows[0].is_active) {
+      return res.status(401).json({
+        statusCode: 401,
+        error: 'Unauthorized',
+        message: 'Admin account inactive or not found',
+      });
+    }
+
+    const admin = adminRows[0];
+    const newAccessToken = generateAdminToken(admin);
+    const newRefreshToken = generateRefreshToken({ id: admin.id });
+    const newHash = hashToken(newRefreshToken);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    await pool.query(
+      'INSERT INTO admin_refresh_tokens (admin_id, token_hash, expires_at) VALUES ($1, $2, $3);',
+      [admin.id, newHash, expiresAt]
+    );
+
+    return res.status(200).json({
+      token: newAccessToken,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
     });
   } catch (error) {
     next(error);
