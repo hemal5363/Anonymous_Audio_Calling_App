@@ -433,7 +433,39 @@ Permanently deletes the authenticated user's account and removes all personal da
 
 ---
 
-### 3.6 Data Retention & Cleanup Settings (`app_settings`)
+### 3.6 Update Terms / Privacy Consent
+Allows an authenticated user to record acceptance of updated legal terms or privacy policy version.
+
+- **Method:** `PUT` (or `POST`)
+- **Path:** `/user/consent`
+- **Auth Required:** Bearer JWT User
+- **Request Body:**
+```json
+{
+  "terms_version": "1.1",
+  "privacy_version": "1.1"
+}
+```
+- **Response Body (`200 OK`):**
+```json
+{
+  "success": true,
+  "message": "Consent updated successfully",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com",
+    "terms_version": "1.1",
+    "privacy_version": "1.1"
+  }
+}
+```
+- **Error Codes:**
+  - `400 Bad Request`: Neither `terms_version` nor `privacy_version` provided.
+  - `401 Unauthorized`: Missing or invalid access token.
+
+---
+
+### 3.7 Data Retention & Cleanup Settings (`app_settings`)
 System-level data retention and automated cleanup parameters are stored under key `'retention'` in `app_settings`:
 - `call_history_retention_days` (default: `90`): Number of days after which ended `call_sessions` are automatically purged by the background cleanup job. Set to `0` to disable auto-purging.
 - `availability_grace_period_minutes` (default: `60`): Number of minutes after which users with no active socket connection have `is_available` reset to `false`.
@@ -1226,7 +1258,7 @@ All client-emitted events require an authenticated socket connection (`auth: { t
   "reason": "caller_hangup"
 }
 ```
-*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`, `'caller_left'`, `'declined'`, `'blocked'`, `'ended'`, `'superseded'`.
+*Possible `reason` values:* `'caller_hangup'`, `'callee_hangup'`, `'skipped'`, `'balance_exhausted'`, `'ring_timeout'`, `'network_error'`, `'caller_left'`, `'declined'`, `'blocked'`, `'ended'`, `'superseded'`, `'max_duration'`.
 - **Description:** Closes session, cleans up peer connection, and presents the Report/Block prompt on the client.
 
 ---

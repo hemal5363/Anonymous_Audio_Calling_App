@@ -1,5 +1,6 @@
 import { verifyAccessToken } from '../utils/token.js';
 import { pool } from '../db/index.js';
+import { checkAndClearSuspension } from '../services/moderation.service.js';
 
 export async function authenticateUser(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -21,7 +22,7 @@ export async function authenticateUser(req, res, next) {
 
     // Verify user still exists and is not suspended or banned
     const { rows } = await pool.query(
-      'SELECT id, email, phone, status, is_available FROM users WHERE id = $1',
+      'SELECT id, email, phone, status, is_available, suspended_until, terms_version, privacy_version FROM users WHERE id = $1',
       [decoded.userId]
     );
 
@@ -37,6 +38,7 @@ export async function authenticateUser(req, res, next) {
 
     const user = rows[0];
 
+    await checkAndClearSuspension(user, pool);
     if (user.status === 'suspended' || user.status === 'banned') {
       return res.status(403).json({
         statusCode: 403,

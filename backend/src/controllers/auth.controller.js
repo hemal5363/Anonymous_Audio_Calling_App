@@ -10,18 +10,40 @@ import {
   hashToken,
 } from '../utils/token.js';
 import { logger } from '../utils/logger.js';
+import { settingsRegistry, compareSemver } from '../services/settings.service.js';
+import { checkAndClearSuspension } from '../services/moderation.service.js';
+
+function checkVersionGating(req, res) {
+  const clientVersion = req.headers['x-app-version'];
+  if (clientVersion) {
+    const minVersion = settingsRegistry.get('min_supported_mobile_version');
+    if (minVersion && compareSemver(clientVersion, minVersion) < 0) {
+      res.status(426).json({
+        statusCode: 426,
+        error: 'UpgradeRequired',
+        message: 'Please update the app to continue',
+        min_version: minVersion,
+        force_update_url: settingsRegistry.get('force_update_store_url_android'),
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+function checkMaintenance(res) {
+  if (settingsRegistry.get('maintenance_mode_enabled')) {
+    res.status(503).json({
+      statusCode: 503,
+      error: 'ServiceUnavailable',
+      message: settingsRegistry.get('maintenance_mode_message') || 'Service is temporarily down for maintenance',
+    });
+    return false;
+  }
+  return true;
+}
 
 // Validation Schemas
-const registerSchema = z.object({
-  email: z.string().email('Invalid email address format').toLowerCase().trim(),
-  password: z.string().min(8, 'Password must be at least 8 characters long'),
-  confirm_age_18: z.literal(true, {
-    errorMap: () => ({ message: 'You must confirm that you are 18 years or older' }),
-  }),
-  terms_version: z.string().default('1.0'),
-  privacy_version: z.string().default('1.0'),
-});
-
 const loginSchema = z.object({
   email: z.string().email('Invalid email address format').toLowerCase().trim(),
   password: z.string().min(1, 'Password is required'),
@@ -45,13 +67,21 @@ const refreshSchema = z.object({
  */
 async function isMobileLoginEnabled() {
   try {
-    const { rows } = await pool.query("SELECT value_json FROM app_settings WHERE key = 'auth_settings'");
-    if (rows.length === 0) return false;
-    return Boolean(rows[0].value_json?.mobile_login_enabled);
-  } catch (err) {
-    logger.warn('Could not query app_settings for auth_settings, defaulting mobile login to disabled:', err.message);
-    return false;
+    const { rows } = await pool.query(
+      "SELECT value_json FROM app_settings WHERE key = 'auth_settings' OR key = 'mobile_login_enabled' LIMIT 1;"
+    );
+    if (rows && rows.length > 0) {
+      if (typeof rows[0].value_json === 'boolean') {
+        return rows[0].value_json;
+      }
+      if (rows[0].value_json?.mobile_login_enabled !== undefined) {
+        return Boolean(rows[0].value_json.mobile_login_enabled);
+      }
+    }
+  } catch {
+    // ignore
   }
+  return Boolean(settingsRegistry.get('mobile_login_enabled'));
 }
 
 /**
@@ -75,6 +105,31 @@ export async function getAuthConfig(req, res, next) {
  */
 export async function register(req, res, next) {
   try {
+    if (!checkVersionGating(req, res)) return;
+    if (!checkMaintenance(res)) return;
+
+    if (!settingsRegistry.get('user_registration_enabled')) {
+      return res.status(403).json({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'New user registrations are temporarily paused.',
+      });
+    }
+
+    const minPasswordLength = Number(settingsRegistry.get('user_password_min_length') || 8);
+    const activeTerms = settingsRegistry.get('active_terms_version') || '1.0';
+    const activePrivacy = settingsRegistry.get('active_privacy_version') || '1.0';
+
+    const registerSchema = z.object({
+      email: z.string().email('Invalid email address format').toLowerCase().trim(),
+      password: z.string().min(minPasswordLength, `Password must be at least ${minPasswordLength} characters long`),
+      confirm_age_18: z.literal(true, {
+        errorMap: () => ({ message: 'You must confirm that you are 18 years or older' }),
+      }),
+      terms_version: z.string().default(activeTerms),
+      privacy_version: z.string().default(activePrivacy),
+    });
+
     const validated = registerSchema.safeParse(req.body);
     if (!validated.success) {
       return res.status(400).json({
@@ -116,13 +171,14 @@ export async function register(req, res, next) {
 
       const user = userRows[0];
 
-      // Create initial wallet with 10 free trial minutes
+      // Create initial wallet with free trial minutes from settings
+      const trialMinutes = Number(settingsRegistry.get('free_trial_minutes_new_user'));
       await client.query(
         `
         INSERT INTO wallets (user_id, balance_amount, balance_minutes, free_trial_minutes)
-        VALUES ($1, 0.00, 0, 10);
+        VALUES ($1, 0.00, 0, $2);
         `,
-        [user.id]
+        [user.id, trialMinutes]
       );
 
       // Generate tokens
@@ -172,6 +228,17 @@ export async function register(req, res, next) {
  */
 export async function login(req, res, next) {
   try {
+    if (!checkVersionGating(req, res)) return;
+    if (!checkMaintenance(res)) return;
+
+    if (!settingsRegistry.get('email_login_enabled')) {
+      return res.status(403).json({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'Email login is currently disabled.',
+      });
+    }
+
     const validated = loginSchema.safeParse(req.body);
     if (!validated.success) {
       return res.status(400).json({
@@ -186,7 +253,7 @@ export async function login(req, res, next) {
     // Find user by email
     const { rows } = await pool.query(
       `
-      SELECT id, email, phone, password_hash, status, is_available
+      SELECT id, email, phone, password_hash, status, is_available, suspended_until
       FROM users
       WHERE email = $1;
       `,
@@ -203,12 +270,14 @@ export async function login(req, res, next) {
 
     const user = rows[0];
 
-    // Check account status
+    // Check account status and auto-clear expired suspension if applicable
+    await checkAndClearSuspension(user, pool);
     if (user.status === 'suspended' || user.status === 'banned') {
       return res.status(403).json({
         statusCode: 403,
         error: 'Forbidden',
         message: 'Account is suspended or banned',
+        suspended_until: user.suspended_until,
       });
     }
 
@@ -261,6 +330,9 @@ export async function login(req, res, next) {
  */
 export async function requestOtp(req, res, next) {
   try {
+    if (!checkVersionGating(req, res)) return;
+    if (!checkMaintenance(res)) return;
+
     // 1. Check if mobile login is enabled by administrator
     const enabled = await isMobileLoginEnabled();
     if (!enabled) {
@@ -282,22 +354,25 @@ export async function requestOtp(req, res, next) {
     }
 
     const { phone } = validated.data;
+    const cooldownSec = settingsRegistry.get('otp_resend_cooldown_seconds') ?? 60;
+    const expirySec = settingsRegistry.get('otp_expiry_seconds') ?? 300;
+    const maxAttempts = settingsRegistry.get('otp_max_verify_attempts') ?? 3;
 
-    // 3. Rate limiting / Cooldown: check for recent OTP request for this phone within 60 seconds
+    // 3. Rate limiting / Cooldown: check for recent OTP request for this phone within cooldown
     const recentOtp = await pool.query(
       `
       SELECT id FROM otp_codes 
-      WHERE target = $1 AND purpose = 'login' AND created_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds' 
+      WHERE target = $1 AND purpose = 'login' AND created_at > CURRENT_TIMESTAMP - ($2 || ' seconds')::INTERVAL 
       LIMIT 1;
       `,
-      [phone]
+      [phone, cooldownSec]
     );
 
     if (recentOtp.rows.length > 0) {
       return res.status(429).json({
         statusCode: 429,
         error: 'TooManyRequests',
-        message: 'Please wait 60 seconds before requesting another code',
+        message: `Please wait ${cooldownSec} seconds before requesting another code`,
       });
     }
 
@@ -315,26 +390,26 @@ export async function requestOtp(req, res, next) {
       [phone]
     );
 
-    // Save new OTP record (valid for 5 minutes)
+    // Save new OTP record
     await pool.query(
       `
       INSERT INTO otp_codes (target, code_hash, purpose, expires_at, max_attempts)
-      VALUES ($1, $2, 'login', CURRENT_TIMESTAMP + INTERVAL '5 minutes', 3);
+      VALUES ($1, $2, 'login', CURRENT_TIMESTAMP + ($3 || ' seconds')::INTERVAL, $4);
       `,
-      [phone, codeHash]
+      [phone, codeHash, expirySec, maxAttempts]
     );
 
     // 5. In development/staging environments: print OTP to the server console instead of sending SMS
     if (config.env !== 'production') {
       logger.info('===============================================================');
       logger.info(`[DEV CONSOLE] Mobile Login OTP for ${phone}: [ ${otp} ]`);
-      logger.info('Expires in 5 minutes (300 seconds). Do not share this code.');
+      logger.info(`Expires in ${Math.round(expirySec / 60)} minutes (${expirySec} seconds). Do not share this code.`);
       logger.info('===============================================================');
     }
 
     return res.status(200).json({
       message: 'OTP sent successfully',
-      expires_in_seconds: 300,
+      expires_in_seconds: expirySec,
     });
   } catch (error) {
     next(error);
@@ -346,6 +421,9 @@ export async function requestOtp(req, res, next) {
  */
 export async function verifyOtp(req, res, next) {
   try {
+    if (!checkVersionGating(req, res)) return;
+    if (!checkMaintenance(res)) return;
+
     // 1. Check if mobile login is enabled
     const enabled = await isMobileLoginEnabled();
     if (!enabled) {
@@ -431,7 +509,7 @@ export async function verifyOtp(req, res, next) {
 
       // Check if user already exists
       const { rows: userRows } = await client.query(
-        `SELECT id, email, phone, status, is_available FROM users WHERE phone = $1;`,
+        `SELECT id, email, phone, status, is_available, suspended_until FROM users WHERE phone = $1;`,
         [phone]
       );
 
@@ -439,6 +517,7 @@ export async function verifyOtp(req, res, next) {
 
       if (userRows.length > 0) {
         user = userRows[0];
+        await checkAndClearSuspension(user, client);
         if (user.status === 'suspended' || user.status === 'banned') {
           await client.query('ROLLBACK');
           return res.status(403).json({
@@ -448,24 +527,37 @@ export async function verifyOtp(req, res, next) {
           });
         }
       } else {
+        if (!settingsRegistry.get('user_registration_enabled')) {
+          await client.query('ROLLBACK');
+          return res.status(403).json({
+            statusCode: 403,
+            error: 'Forbidden',
+            message: 'New user registrations are temporarily paused.',
+          });
+        }
+
+        const activeTerms = settingsRegistry.get('active_terms_version') || '1.0';
+        const activePrivacy = settingsRegistry.get('active_privacy_version') || '1.0';
+
         // Auto-create new user account with phone
         const { rows: newUserRows } = await client.query(
           `
-          INSERT INTO users (phone, status, is_available)
-          VALUES ($1, 'active', FALSE)
+          INSERT INTO users (phone, terms_version, privacy_version, status, is_available)
+          VALUES ($1, $2, $3, 'active', FALSE)
           RETURNING id, email, phone, status, is_available;
           `,
-          [phone]
+          [phone, activeTerms, activePrivacy]
         );
         user = newUserRows[0];
 
         // Create wallet for new phone user
+        const trialMinutes = Number(settingsRegistry.get('free_trial_minutes_new_user'));
         await client.query(
           `
           INSERT INTO wallets (user_id, balance_amount, balance_minutes, free_trial_minutes)
-          VALUES ($1, 0.00, 0, 10);
+          VALUES ($1, 0.00, 0, $2);
           `,
-          [user.id]
+          [user.id, trialMinutes]
         );
       }
 
@@ -570,7 +662,7 @@ export async function refresh(req, res, next) {
 
     // Check user account status
     const { rows: userRows } = await pool.query(
-      'SELECT id, email, phone, status, is_available FROM users WHERE id = $1',
+      'SELECT id, email, phone, status, is_available, suspended_until FROM users WHERE id = $1',
       [tokenRecord.user_id]
     );
 
@@ -584,6 +676,7 @@ export async function refresh(req, res, next) {
 
     const user = userRows[0];
 
+    await checkAndClearSuspension(user, pool);
     if (user.status === 'suspended' || user.status === 'banned') {
       return res.status(403).json({
         statusCode: 403,

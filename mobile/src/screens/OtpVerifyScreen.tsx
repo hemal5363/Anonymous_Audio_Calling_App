@@ -13,11 +13,13 @@ import {
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { OtpVerifyScreenNavigationProp, OtpVerifyScreenRouteProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
 
 export default function OtpVerifyScreen() {
   const navigation = useNavigation<OtpVerifyScreenNavigationProp>();
   const route = useRoute<OtpVerifyScreenRouteProp>();
   const { verifyOtp, requestOtp } = useAuth();
+  const { config } = usePublicConfig();
 
   const phone = route.params?.phone || '';
   const [otp, setOtp] = useState('');
@@ -26,8 +28,8 @@ export default function OtpVerifyScreen() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Countdown timer for resend
-  const [countdown, setCountdown] = useState<number>(60);
+  // Dynamic countdown timer for resend from server config
+  const [countdown, setCountdown] = useState<number>(config.auth.otp_resend_cooldown_seconds);
 
   useEffect(() => {
     if (countdown <= 0) return;
@@ -71,7 +73,7 @@ export default function OtpVerifyScreen() {
     try {
       await requestOtp(phone);
       setSuccessMessage('A new verification code has been sent.');
-      setCountdown(60);
+      setCountdown(config.auth.otp_resend_cooldown_seconds);
     } catch (err: any) {
       const msg = err?.message || 'Failed to resend code. Please try again later.';
       setErrorMessage(msg);
@@ -89,7 +91,7 @@ export default function OtpVerifyScreen() {
         <View style={styles.card}>
           <Text style={styles.title}>Enter Verification Code</Text>
           <Text style={styles.subtitle}>
-            A 6-digit code was sent to <Text style={styles.highlightText}>{phone}</Text>
+            A 6-digit code was sent to <Text style={styles.highlightText}>{phone}</Text> (valid for {Math.floor(config.auth.otp_expiry_seconds / 60)} minutes)
           </Text>
 
           {/* Success Banner */}

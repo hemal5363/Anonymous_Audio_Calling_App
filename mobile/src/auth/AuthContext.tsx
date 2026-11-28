@@ -3,6 +3,7 @@ import { tokenStorage } from './tokenStorage';
 import { api, setOnUnauthorizedCallback } from '../api/client';
 import { connectSocket, disconnectSocket } from '../socket';
 import { unregisterPushToken } from '../push/pushService';
+import { getLatestPublicConfig, saveAcceptedConsentVersions } from '../config/publicConfig';
 
 export interface User {
   id: string;
@@ -87,6 +88,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const register = async (email: string, password: string) => {
+    const config = getLatestPublicConfig();
+    const termsVersion = config.legal.active_terms_version || '1.0';
+    const privacyVersion = config.legal.active_privacy_version || '1.0';
+
     const res = await api.post<{
       user: User;
       tokens: { accessToken: string; refreshToken: string };
@@ -94,10 +99,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email,
       password,
       confirm_age_18: true,
-      terms_version: '1.0',
-      privacy_version: '1.0',
+      terms_version: termsVersion,
+      privacy_version: privacyVersion,
     });
 
+    await saveAcceptedConsentVersions(termsVersion, privacyVersion);
     await tokenStorage.setTokens(res.tokens.accessToken, res.tokens.refreshToken);
     setUser(res.user);
     await connectSocket();

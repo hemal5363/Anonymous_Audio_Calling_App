@@ -1,5 +1,6 @@
 import { pool } from '../db/index.js';
 import { getMonetizationSettings } from '../services/billing.service.js';
+import { settingsRegistry } from '../services/settings.service.js';
 
 /**
  * 5.1 Get Wallet Balance & Details
@@ -20,7 +21,7 @@ export async function getWallet(req, res, next) {
 
     let wallet;
     if (rows.length === 0) {
-      const defaultTrial = monetization.free_trial_minutes_new_user || 10;
+      const defaultTrial = Number(settingsRegistry.get('free_trial_minutes_new_user'));
       const insertRes = await pool.query(
         `INSERT INTO wallets (user_id, balance_amount, balance_minutes, free_trial_minutes)
          VALUES ($1, '0.00', 0, $2)

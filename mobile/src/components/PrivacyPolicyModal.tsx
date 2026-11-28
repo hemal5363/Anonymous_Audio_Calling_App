@@ -9,6 +9,8 @@ import {
   SafeAreaView,
   Linking,
 } from 'react-native';
+import { usePublicConfig } from '../config/PublicConfigContext';
+import { MIN_REGISTRATION_AGE } from '../config/constants';
 
 interface PrivacyPolicyModalProps {
   visible: boolean;
@@ -16,9 +18,19 @@ interface PrivacyPolicyModalProps {
 }
 
 export default function PrivacyPolicyModal({ visible, onClose }: PrivacyPolicyModalProps) {
-  const handleOpenBrowser = async () => {
+  const { config } = usePublicConfig();
+
+  const handleOpenPrivacy = async () => {
     try {
-      await Linking.openURL('https://anonaudiocall.com/privacy');
+      await Linking.openURL(config.legal.privacy_policy_url);
+    } catch {
+      // Browser not available or URL unresolvable in test
+    }
+  };
+
+  const handleOpenTerms = async () => {
+    try {
+      await Linking.openURL(config.legal.terms_of_service_url);
     } catch {
       // Browser not available or URL unresolvable in test
     }
@@ -28,14 +40,24 @@ export default function PrivacyPolicyModal({ visible, onClose }: PrivacyPolicyMo
     <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onClose}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Privacy Policy</Text>
+          <Text style={styles.headerTitle}>Legal & Privacy Policy</Text>
           <TouchableOpacity onPress={onClose} style={styles.closeButton} activeOpacity={0.7}>
             <Text style={styles.closeButtonText}>Done</Text>
           </TouchableOpacity>
         </View>
 
         <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-          <Text style={styles.lastUpdated}>Effective & Last Updated: November 22, 2026</Text>
+          <Text style={styles.lastUpdated}>
+            Terms v{config.legal.active_terms_version} • Privacy v{config.legal.active_privacy_version}
+          </Text>
+
+          {/* Age Requirement Highlight */}
+          <View style={styles.ageBadgeCard}>
+            <Text style={styles.ageBadgeTitle}>🔞 Age Requirement ({MIN_REGISTRATION_AGE}+)</Text>
+            <Text style={styles.ageBadgeText}>
+              You must be at least {MIN_REGISTRATION_AGE} years of age to register and use Anonymous Audio Calling.
+            </Text>
+          </View>
 
           {/* Core Guarantee Highlight */}
           <View style={styles.highlightCard}>
@@ -93,10 +115,15 @@ export default function PrivacyPolicyModal({ visible, onClose }: PrivacyPolicyMo
             <Text style={styles.bulletPoint}>• Historical call logs are permanently anonymized and unlinked.</Text>
           </View>
 
-          {/* Browser Link Option */}
-          <TouchableOpacity style={styles.browserButton} onPress={handleOpenBrowser} activeOpacity={0.8}>
-            <Text style={styles.browserButtonText}>🌐 View Hosted Privacy Policy Online</Text>
-          </TouchableOpacity>
+          {/* External Links */}
+          <View style={styles.linksRow}>
+            <TouchableOpacity style={styles.browserButton} onPress={handleOpenPrivacy} activeOpacity={0.8}>
+              <Text style={styles.browserButtonText}>🌐 View Privacy Policy</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.browserButton} onPress={handleOpenTerms} activeOpacity={0.8}>
+              <Text style={styles.browserButtonText}>📜 View Terms of Service</Text>
+            </TouchableOpacity>
+          </View>
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -146,6 +173,25 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginBottom: 16,
   },
+  ageBadgeCard: {
+    backgroundColor: '#1e1b4b',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#4338ca',
+  },
+  ageBadgeTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#a5b4fc',
+    marginBottom: 4,
+  },
+  ageBadgeText: {
+    fontSize: 12,
+    color: '#c7d2fe',
+    lineHeight: 17,
+  },
   highlightCard: {
     backgroundColor: '#064e3b',
     borderRadius: 12,
@@ -192,7 +238,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#f8fafc',
   },
+  linksRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 24,
+  },
   browserButton: {
+    flex: 1,
     backgroundColor: '#1e293b',
     borderWidth: 1,
     borderColor: '#38bdf8',
@@ -200,11 +252,10 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 24,
   },
   browserButtonText: {
     color: '#38bdf8',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
   },
 });

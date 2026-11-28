@@ -8,17 +8,28 @@ import {
   ActivityIndicator,
   ScrollView,
   SafeAreaView,
+  Linking,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { SettingsScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
 import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 
 export default function SettingsScreen() {
   const navigation = useNavigation<SettingsScreenNavigationProp>();
   const { user, deleteAccount, logout } = useAuth();
+  const { config } = usePublicConfig();
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [showPrivacyModal, setShowPrivacyModal] = useState<boolean>(false);
+
+  const handleOpenTerms = async () => {
+    try {
+      await Linking.openURL(config.legal.terms_of_service_url);
+    } catch {
+      Alert.alert('Error', 'Unable to open terms of service link.');
+    }
+  };
 
   const handleDeleteAccountPress = () => {
     Alert.alert(
@@ -103,17 +114,26 @@ export default function SettingsScreen() {
           <View style={styles.bulletItem}>
             <Text style={styles.bulletDot}>•</Text>
             <Text style={styles.bulletText}>
-              <Text style={styles.bold}>Terms & Privacy:</Text> Version 1.0 active.
+              <Text style={styles.bold}>Terms & Privacy:</Text> Terms v{config.legal.active_terms_version} • Privacy v{config.legal.active_privacy_version}
             </Text>
           </View>
 
-          <TouchableOpacity
-            style={styles.privacyLinkButton}
-            onPress={() => setShowPrivacyModal(true)}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.privacyLinkButtonText}>📄 Read Full Privacy Policy</Text>
-          </TouchableOpacity>
+          <View style={styles.privacyButtonsRow}>
+            <TouchableOpacity
+              style={styles.privacyLinkButton}
+              onPress={() => setShowPrivacyModal(true)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.privacyLinkButtonText}>📄 Read Privacy Policy</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.privacyLinkButton}
+              onPress={handleOpenTerms}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.privacyLinkButtonText}>📜 Terms of Service</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Danger Zone: Account Deletion (Google Play Required) */}
@@ -269,8 +289,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.3,
   },
-  privacyLinkButton: {
+  privacyButtonsRow: {
+    flexDirection: 'row',
+    gap: 10,
     marginTop: 12,
+  },
+  privacyLinkButton: {
+    flex: 1,
     backgroundColor: '#0f172a',
     borderWidth: 1,
     borderColor: '#38bdf8',

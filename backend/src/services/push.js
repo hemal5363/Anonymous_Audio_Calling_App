@@ -1,6 +1,7 @@
 import { Expo } from 'expo-server-sdk';
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { settingsRegistry } from './settings.service.js';
 
 // Initialize Expo SDK client
 export const expo = new Expo();
@@ -91,7 +92,7 @@ export function scheduleReceiptCheck(receiptId, pushToken, delayMs = 60000) {
  * @param {string} sessionId - Call session UUID / identifier
  * @returns {Promise<{success: boolean, reason?: string, error?: string, tickets?: any[]}>}
  */
-export async function sendIncomingCallPush(pushToken, sessionId) {
+export async function sendIncomingCallPush(pushToken, sessionId, customTtl) {
   if (!pushToken) {
     logger.warn(`[Push Service] Cannot send push notification: missing pushToken for session: ${sessionId}`);
     return { success: false, reason: 'missing_push_token' };
@@ -104,14 +105,18 @@ export async function sendIncomingCallPush(pushToken, sessionId) {
     return { success: false, reason: 'invalid_push_token' };
   }
 
+  const ringTimeoutSeconds = Number(customTtl || settingsRegistry.get('ring_timeout_seconds') || 30);
+  const pushTitle = settingsRegistry.get('push_notification_title') || 'Incoming call';
+  const pushBody = settingsRegistry.get('push_notification_body') || 'Someone wants to talk';
+
   const message = {
     to: pushToken,
     sound: 'default',
-    title: 'Incoming call',
-    body: 'Someone wants to talk',
+    title: pushTitle,
+    body: pushBody,
     priority: 'high',
     channelId: 'incoming_calls',
-    ttl: 30, // 30 seconds matching ring timeout
+    ttl: ringTimeoutSeconds,
     data: {
       type: 'incoming_call',
       sessionId: String(sessionId),

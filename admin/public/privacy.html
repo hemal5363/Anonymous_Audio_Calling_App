@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy - Anonymous Audio Calling</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --primary: #38bdf8;
+      --accent: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 24px 16px;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px 24px;
+    }
+    h1 { font-size: 26px; color: #fff; margin-bottom: 8px; }
+    .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+    h2 { font-size: 20px; color: var(--primary); margin: 28px 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    h3 { font-size: 16px; color: #e2e8f0; margin: 16px 0 8px 0; }
+    p, ul { margin-bottom: 14px; font-size: 15px; color: #cbd5e1; }
+    ul { padding-left: 20px; }
+    li { margin-bottom: 6px; }
+    .highlight-box {
+      background: rgba(56, 189, 248, 0.08);
+      border-left: 4px solid var(--primary);
+      padding: 14px 16px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 24px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      text-align: left;
+    }
+    th { background: #0f172a; color: var(--primary); }
+    td { color: #cbd5e1; }
+    a { color: var(--primary); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Privacy Policy for Anonymous Audio Calling</h1>
+    <div class="meta">
+      <strong>Effective Date:</strong> November 22, 2026 | <strong>Version:</strong> 1.0
+    </div>
+
+    <div class="highlight-box">
+      <strong>Core Guarantee: Zero Peer Identity & No Audio Recording</strong><br>
+      We connect voice calls directly peer-to-peer using end-to-end encrypted WebRTC. We do not record, store, transcribe, or listen to audio conversations. No audio files exist on our servers.
+    </div>
+
+    <h2>1. Core Guarantee: Zero Peer Identity</h2>
+    <h3>1.1 Strict Peer Anonymity</h3>
+    <p>When you place or receive a call on Anonymous Audio Calling:</p>
+    <ul>
+      <li><strong>Your identity is never disclosed to other users:</strong> Your name, email address, phone number, and IP address are never displayed or shared with the person you talk to.</li>
+      <li>Both caller and callee see only the moniker <em>"Anonymous Caller"</em> or <em>"Anonymous User"</em>.</li>
+      <li>Each call is assigned an ephemeral, randomized session code that cannot be correlated to your real identity.</li>
+    </ul>
+
+    <h3>1.2 No Audio Recording or Interception</h3>
+    <p>Calls are conducted peer-to-peer using encrypted WebRTC. Audio streams flow directly between participants' devices using end-to-end encryption (SRTP/DTLS). If direct peer-to-peer connection fails due to firewalls, media passes through encrypted TURN relays without being decoded, saved, or inspected by our servers.</p>
+
+    <h2>2. Information We Collect</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Category</th>
+          <th>Specific Data Points</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Account Authentication</strong></td>
+          <td>Email address or Phone number (for SMS OTP), securely hashed password</td>
+          <td>Account creation, login verification, session authentication.</td>
+        </tr>
+        <tr>
+          <td><strong>Push Notification Token</strong></td>
+          <td>Expo Push Token (random device identifier)</td>
+          <td>To alert your device of incoming calls when the app is backgrounded or closed.</td>
+        </tr>
+        <tr>
+          <td><strong>Call Metadata</strong></td>
+          <td>Timestamp, duration in seconds, anonymous session ID, termination status</td>
+          <td>Connection reliability monitoring, billing/balance deduction, diagnostics.</td>
+        </tr>
+        <tr>
+          <td><strong>Abuse & Safety Reports</strong></td>
+          <td>Report reason (e.g. harassment, abusive language), optional note</td>
+          <td>Platform safety moderation and community standard enforcement.</td>
+        </tr>
+        <tr>
+          <td><strong>Device & Network Data</strong></td>
+          <td>Ephemeral IP address during active connection</td>
+          <td>WebRTC ICE candidate signaling and rate-limiting abuse prevention.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>3. How We Store and Protect Your Data</h2>
+    <ul>
+      <li><strong>Hardware-Backed Storage:</strong> On mobile devices, authentication tokens are stored exclusively in hardware-backed storage via Expo SecureStore (Android Keystore / iOS Keychain). Tokens are never written to unencrypted AsyncStorage or exposed in application logs.</li>
+      <li><strong>Transport Encryption:</strong> All API communication occurs over HTTPS with TLS 1.3 encryption. Real-time signaling uses authenticated WebSockets Secure (WSS).</li>
+      <li><strong>No Third-Party Trackers:</strong> We do not embed third-party advertising SDKs or tracking pixels that harvest user data.</li>
+    </ul>
+
+    <h2>4. Device Permissions</h2>
+    <ul>
+      <li><strong>Microphone (RECORD_AUDIO):</strong> Activated solely during active voice calls. Deactivated immediately when the call ends.</li>
+      <li><strong>Notifications:</strong> Required to alert you to incoming calls when the app is backgrounded or closed.</li>
+    </ul>
+
+    <h2>5. Data Retention & Account Deletion</h2>
+    <p>Operational call metadata is retained for 90 days for billing dispute resolution and quality auditing, after which it is deleted. You may delete your account at any time within the app (<strong>Settings & Account &rarr; Delete My Account</strong>). Deletion permanently erases your credentials and push tokens from our servers.</p>
+
+    <h2>6. Age Requirement (18+)</h2>
+    <p>Our Service is intended exclusively for users who are <strong>18 years of age or older</strong>. We do not knowingly collect personal information from individuals under 18.</p>
+
+    <h2>7. Contact</h2>
+    <p>If you have questions regarding this Privacy Policy, please contact our privacy team at <a href="mailto:privacy@anonaudiocall.com">privacy@anonaudiocall.com</a>.</p>
+  </div>
+</body>
+</html>

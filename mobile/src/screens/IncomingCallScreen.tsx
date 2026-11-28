@@ -10,14 +10,16 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { IncomingCallScreenNavigationProp } from '../navigation/types';
 import { useCall } from '../call/CallContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
 
 export default function IncomingCallScreen() {
   const navigation = useNavigation<IncomingCallScreenNavigationProp>();
+  const { config } = usePublicConfig();
   const { callStatus, incomingCall, acceptIncoming, rejectIncoming, lastEndInfo, clearEndInfo } = useCall();
 
-  // Ring timer countdown (30s)
+  // Dynamic Ring timer countdown based on server snapshot with config fallback
   const [secondsRemaining, setSecondsRemaining] = useState<number>(
-    incomingCall?.ringSeconds || 30
+    incomingCall?.ringSeconds || config.calls.ring_timeout_seconds
   );
 
   useEffect(() => {

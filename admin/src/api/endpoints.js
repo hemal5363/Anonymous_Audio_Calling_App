@@ -10,6 +10,8 @@ export const API_ENDPOINTS = {
   // Settings
   SETTINGS: '/admin/settings',
   SETTING_BY_KEY: (key) => `/admin/settings/${key}`,
+  SETTINGS_HISTORY: '/admin/settings/history',
+  SETTINGS_STATUS: '/admin/settings/status',
 
   // Users
   USERS: '/admin/users',

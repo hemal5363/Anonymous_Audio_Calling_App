@@ -1,12 +1,27 @@
 import rateLimit from 'express-rate-limit';
 import { config } from '../config/index.js';
+import { settingsRegistry } from '../services/settings.service.js';
+
+function resolveLimit(key, envName, fallback) {
+  if (settingsRegistry.hasOverride && settingsRegistry.hasOverride(key)) {
+    return Number(settingsRegistry.get(key));
+  }
+  if (process.env[envName] !== undefined && process.env[envName] !== '') {
+    return Number(process.env[envName]);
+  }
+  try {
+    return Number(settingsRegistry.get(key));
+  } catch (_) {
+    return Number(fallback);
+  }
+}
 
 /**
  * Global rate limiter (per IP)
  */
 export const globalLimiter = rateLimit({
   windowMs: config.rateLimit.globalWindowMs,
-  max: () => config.rateLimit.globalMax,
+  max: () => resolveLimit('rate_limit_global_max', 'RATE_LIMIT_GLOBAL_MAX', config.rateLimit.globalMax),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -21,7 +36,7 @@ export const globalLimiter = rateLimit({
  */
 export const registerLimiter = rateLimit({
   windowMs: config.rateLimit.registerWindowMs,
-  max: () => config.rateLimit.registerMax,
+  max: () => resolveLimit('rate_limit_register_max', 'RATE_LIMIT_REGISTER_MAX', config.rateLimit.registerMax),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -36,7 +51,7 @@ export const registerLimiter = rateLimit({
  */
 export const loginIpLimiter = rateLimit({
   windowMs: config.rateLimit.loginWindowMs,
-  max: () => config.rateLimit.loginMax,
+  max: () => resolveLimit('rate_limit_login_ip_max', 'RATE_LIMIT_LOGIN_MAX', config.rateLimit.loginMax),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -51,7 +66,7 @@ export const loginIpLimiter = rateLimit({
  */
 export const loginAccountLimiter = rateLimit({
   windowMs: config.rateLimit.loginWindowMs,
-  max: () => config.rateLimit.loginAccountMax,
+  max: () => resolveLimit('rate_limit_login_account_max', 'RATE_LIMIT_LOGIN_ACCOUNT_MAX', config.rateLimit.loginAccountMax),
   standardHeaders: true,
   legacyHeaders: false,
   validate: false,
@@ -71,7 +86,7 @@ export const loginAccountLimiter = rateLimit({
  */
 export const otpRequestIpLimiter = rateLimit({
   windowMs: config.rateLimit.otpRequestWindowMs,
-  max: () => config.rateLimit.otpRequestMax,
+  max: () => resolveLimit('rate_limit_otp_request_max', 'RATE_LIMIT_OTP_REQUEST_MAX', config.rateLimit.otpRequestMax),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -86,7 +101,7 @@ export const otpRequestIpLimiter = rateLimit({
  */
 export const otpRequestPhoneLimiter = rateLimit({
   windowMs: config.rateLimit.otpRequestWindowMs,
-  max: () => config.rateLimit.otpRequestPhoneMax,
+  max: () => resolveLimit('rate_limit_otp_request_phone_max', 'RATE_LIMIT_OTP_REQUEST_PHONE_MAX', config.rateLimit.otpRequestPhoneMax),
   standardHeaders: true,
   legacyHeaders: false,
   validate: false,

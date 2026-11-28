@@ -1,375 +1,615 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { apiClient } from '../api/client.js';
 import { API_ENDPOINTS } from '../api/endpoints.js';
 
-const MODES = [
-  {
-    id: 'free',
-    name: 'Free Mode',
-    tagline: 'Zero Cost for All Callers',
-    description: 'Anyone can place audio calls without wallet balance or paid plans. Free trial caps can be configured.',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
-        <line x1="7" y1="7" x2="7.01" y2="7"></line>
-      </svg>
-    ),
-  },
-  {
-    id: 'subscription',
-    name: 'Subscription',
-    tagline: 'Tiered Membership Plans',
-    description: 'Callers must have an active subscription package. Callee receives calls for free.',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
-        <line x1="1" y1="10" x2="23" y2="10"></line>
-      </svg>
-    ),
-  },
-  {
-    id: 'per_minute',
-    name: 'Per-Minute Rate',
-    tagline: 'Pay-As-You-Go Metering',
-    description: 'Requires a minimum wallet balance before dialing. Minutes are deducted dynamically every 60s.',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10"></circle>
-        <polyline points="12 6 12 12 16 14"></polyline>
-      </svg>
-    ),
-  },
+// Canonical Tab Order and Display Labels
+const CANONICAL_GROUPS = [
+  { id: 'system', label: 'System' },
+  { id: 'auth', label: 'Auth & OTP' },
+  { id: 'matching', label: 'Matching & Calls' },
+  { id: 'billing', label: 'Billing' },
+  { id: 'moderation', label: 'Moderation' },
+  { id: 'limits', label: 'Limits' },
+  { id: 'retention', label: 'Retention' },
+  { id: 'legal', label: 'Legal & Text' },
 ];
 
-const DEFAULT_PLANS = [
-  { id: '1', name: 'Starter Pass', price: 49.0, duration_days: 30, daily_minute_cap: 30 },
-  { id: '2', name: 'Unlimited Monthly', price: 99.0, duration_days: 30, daily_minute_cap: 0 },
+// Presets for Same-Peer Rematch Cooldown
+const COOLDOWN_PRESETS = [
+  { label: '0 (Disabled)', value: 0 },
+  { label: '30s', value: 30 },
+  { label: '60s (Default)', value: 60 },
+  { label: '5 min', value: 300 },
+  { label: '30 min', value: 1800 },
 ];
+
+/**
+ * Format timestamp in Asia/Kolkata timezone (YYYY-MM-DD HH:mm:ss IST)
+ */
+function formatIST(dateStr) {
+  if (!dateStr) return '—';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return String(dateStr);
+    const parts = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const map = {};
+    parts.forEach((p) => {
+      map[p.type] = p.value;
+    });
+    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second} IST`;
+  } catch {
+    return String(dateStr);
+  }
+}
+
+/**
+ * Safe value stringifier for diff display
+ */
+function formatValueDisplay(val) {
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'boolean') return val ? 'true' : 'false';
+  if (typeof val === 'object') {
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return String(val);
+    }
+  }
+  return String(val);
+}
 
 export function SettingsPage() {
+  // Main settings data from GET /admin/settings
+  const [settingsList, setSettingsList] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
+  // Status data from GET /admin/settings/status
+  const [systemStatus, setSystemStatus] = useState({
+    sms_provider_configured: false,
+    environment: 'development',
+  });
+
+  // Active tab selection
+  const [activeTab, setActiveTab] = useState('system');
+
+  // Pending unsaved edits: { [key]: pendingValue }
+  const [pendingChanges, setPendingChanges] = useState({});
+
+  // Client validation errors: { [key]: errorMessage }
+  const [clientErrors, setClientErrors] = useState({});
+
+  // Server error messages per key: { [key]: errorMessage }
+  const [serverErrors, setServerErrors] = useState({});
+
+  // Status banners / toasts
   const [saving, setSaving] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
-  const [validationErrors, setValidationErrors] = useState({});
+  const [saveBanner, setSaveBanner] = useState(null); // { type: 'success'|'error'|'warning', message: '' }
+  const [resettingKey, setResettingKey] = useState(null);
 
-  // Original saved values (to detect mode changes)
-  const [savedSettings, setSavedSettings] = useState(null);
+  // Critical change confirmation modal state
+  const [showCriticalModal, setShowCriticalModal] = useState(false);
+  const [criticalItems, setCriticalItems] = useState([]);
 
-  // Form states
-  const [monetization, setMonetization] = useState({
-    mode: 'free',
-    per_minute_rate: 1.0,
-    currency: 'INR',
-    minimum_balance: 5.0,
-    free_trial_minutes_new_user: 10,
-    free_daily_minute_cap: 30,
-    subscription_plans: DEFAULT_PLANS,
+  // Settings History State
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [historyPagination, setHistoryPagination] = useState({
+    page: 1,
+    limit: 20,
+    total: 0,
+    totalPages: 1,
   });
+  const [historyFilterKey, setHistoryFilterKey] = useState('');
+  const [historyStartDate, setHistoryStartDate] = useState('');
+  const [historyEndDate, setHistoryEndDate] = useState('');
 
-  const [authSettings, setAuthSettings] = useState({
-    email_login_enabled: true,
-    mobile_login_enabled: false,
-    otp_expiry_seconds: 300,
-    max_otp_attempts: 3,
-  });
+  // Map of settings by key for instant lookup
+  const settingsByKey = useMemo(() => {
+    const map = new Map();
+    settingsList.forEach((s) => map.set(s.key, s));
+    return map;
+  }, [settingsList]);
 
-  const [matchingSettings, setMatchingSettings] = useState({
-    cooldown_same_peer_seconds: 60,
-    ring_timeout_seconds: 30,
-    max_match_attempts: 3,
-    try_live_presence_first: true,
-  });
+  // Discover all tabs dynamically
+  const tabs = useMemo(() => {
+    const presentGroups = new Set();
+    settingsList.forEach((s) => {
+      if (s.group) presentGroups.add(s.group);
+    });
 
-  // Admin password change form state (enforces strong admin password policy)
-  const [passwordForm, setPasswordForm] = useState({
-    current_password: '',
-    new_password: '',
-    confirm_password: '',
-  });
-  const [passwordSaving, setPasswordSaving] = useState(false);
-  const [passwordSuccess, setPasswordSuccess] = useState('');
-  const [passwordError, setPasswordError] = useState('');
+    const ordered = [];
+    // 1. Canonical tabs that exist
+    CANONICAL_GROUPS.forEach((cg) => {
+      if (presentGroups.has(cg.id)) {
+        ordered.push(cg);
+        presentGroups.delete(cg.id);
+      }
+    });
 
-  // Confirmation modal state for monetization mode change
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
+    // 2. Any unknown future groups appear as extra tabs
+    Array.from(presentGroups).sort().forEach((extraId) => {
+      const formattedLabel = extraId
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+      ordered.push({ id: extraId, label: formattedLabel });
+    });
 
-  // Fetch settings from backend
-  const fetchSettings = useCallback(async () => {
+    // 3. Always append History tab
+    ordered.push({ id: 'history', label: 'History' });
+    return ordered;
+  }, [settingsList]);
+
+  // Fetch settings & system status
+  const fetchSettingsAndStatus = useCallback(async () => {
     setLoading(true);
-    setErrorMsg('');
+    setLoadError('');
     try {
-      const data = await apiClient.get(API_ENDPOINTS.SETTINGS);
+      const [settingsData, statusData] = await Promise.all([
+        apiClient.get(API_ENDPOINTS.SETTINGS),
+        apiClient.get(API_ENDPOINTS.SETTINGS_STATUS).catch(() => ({
+          sms_provider_configured: false,
+          environment: 'development',
+        })),
+      ]);
 
-      const mon = data.monetization || {};
-      const auth = data.auth_settings || {};
-      const mat = data.matching_settings || {};
+      const items = Array.isArray(settingsData)
+        ? settingsData
+        : Array.isArray(settingsData?.settings)
+        ? settingsData.settings
+        : [];
 
-      const loadedMonetization = {
-        mode: mon.mode || 'free',
-        per_minute_rate: mon.per_minute_rate !== undefined ? Number(mon.per_minute_rate) : 1.0,
-        currency: mon.currency || 'INR',
-        minimum_balance: mon.minimum_balance !== undefined ? Number(mon.minimum_balance) : 5.0,
-        free_trial_minutes_new_user: mon.free_trial_minutes_new_user !== undefined ? Number(mon.free_trial_minutes_new_user) : 10,
-        free_daily_minute_cap: mon.free_daily_minute_cap !== undefined ? Number(mon.free_daily_minute_cap) : 30,
-        subscription_plans: Array.isArray(mon.subscription_plans) && mon.subscription_plans.length > 0 ? mon.subscription_plans : DEFAULT_PLANS,
-      };
-
-      const loadedAuth = {
-        email_login_enabled: auth.email_login_enabled !== undefined ? Boolean(auth.email_login_enabled) : true,
-        mobile_login_enabled: auth.mobile_login_enabled !== undefined ? Boolean(auth.mobile_login_enabled) : false,
-        otp_expiry_seconds: auth.otp_expiry_seconds ? Number(auth.otp_expiry_seconds) : 300,
-        max_otp_attempts: auth.max_otp_attempts ? Number(auth.max_otp_attempts) : 3,
-      };
-
-      const loadedMatching = {
-        cooldown_same_peer_seconds: mat.cooldown_same_peer_seconds !== undefined ? Number(mat.cooldown_same_peer_seconds) : 60,
-        ring_timeout_seconds: mat.ring_timeout_seconds !== undefined ? Number(mat.ring_timeout_seconds) : 30,
-        max_match_attempts: mat.max_match_attempts !== undefined ? Number(mat.max_match_attempts) : 3,
-        try_live_presence_first: mat.try_live_presence_first !== undefined ? Boolean(mat.try_live_presence_first) : true,
-      };
-
-      setMonetization(loadedMonetization);
-      setAuthSettings(loadedAuth);
-      setMatchingSettings(loadedMatching);
-      setSavedSettings({
-        monetization: loadedMonetization,
-        auth_settings: loadedAuth,
-        matching_settings: loadedMatching,
-      });
+      setSettingsList(items);
+      setSystemStatus(statusData || { sms_provider_configured: false, environment: 'development' });
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load system settings from server.');
+      setLoadError(err.message || 'Failed to load system settings from server.');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchSettings();
-  }, [fetchSettings]);
+    fetchSettingsAndStatus();
+  }, [fetchSettingsAndStatus]);
 
-  // Validation function: ensures non-negative numbers and valid plans
-  const validateForm = () => {
-    const errors = {};
-
-    if (monetization.mode === 'per_minute') {
-      if (monetization.per_minute_rate === '' || Number(monetization.per_minute_rate) < 0 || isNaN(Number(monetization.per_minute_rate))) {
-        errors.per_minute_rate = 'Per-minute rate cannot be negative.';
+  // Warn before leaving if unsaved changes exist
+  const unsavedCount = Object.keys(pendingChanges).length;
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (unsavedCount > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
       }
-      if (monetization.minimum_balance === '' || Number(monetization.minimum_balance) < 0 || isNaN(Number(monetization.minimum_balance))) {
-        errors.minimum_balance = 'Minimum required balance cannot be negative.';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [unsavedCount]);
+
+  // Fetch audit history
+  const fetchHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const queryParams = new URLSearchParams();
+      queryParams.set('page', String(historyPagination.page));
+      queryParams.set('limit', String(historyPagination.limit));
+      if (historyFilterKey) {
+        queryParams.set('key', historyFilterKey);
+      }
+      if (historyStartDate) {
+        queryParams.set('start_date', historyStartDate);
+      }
+      if (historyEndDate) {
+        queryParams.set('end_date', historyEndDate);
+      }
+
+      const endpoint = `${API_ENDPOINTS.SETTINGS_HISTORY}?${queryParams.toString()}`;
+      const data = await apiClient.get(endpoint);
+
+      let rows = Array.isArray(data?.history) ? data.history : [];
+
+      // Also apply client-side date range filtering as a safeguard
+      if (historyStartDate) {
+        const startTs = new Date(`${historyStartDate}T00:00:00`).getTime();
+        rows = rows.filter((r) => new Date(r.created_at).getTime() >= startTs);
+      }
+      if (historyEndDate) {
+        const endTs = new Date(`${historyEndDate}T23:59:59.999`).getTime();
+        rows = rows.filter((r) => new Date(r.created_at).getTime() <= endTs);
+      }
+
+      setHistoryItems(rows);
+      if (data?.pagination) {
+        setHistoryPagination((prev) => ({
+          ...prev,
+          total: data.pagination.total ?? rows.length,
+          totalPages: data.pagination.totalPages ?? 1,
+        }));
+      }
+    } catch (err) {
+      setHistoryError(err.message || 'Failed to fetch settings audit history.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyPagination.page, historyPagination.limit, historyFilterKey, historyStartDate, historyEndDate]);
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchHistory();
+    }
+  }, [activeTab, fetchHistory]);
+
+  // Validate a single setting value
+  const validateField = (item, val) => {
+    if (val === undefined) return null;
+
+    if (item.type === 'integer') {
+      if (val === '' || val === null || val === undefined) return 'Integer value is required.';
+      const num = Number(val);
+      if (isNaN(num) || !Number.isInteger(num)) return 'Must be a valid integer.';
+      if (item.min !== null && num < item.min) return `Minimum allowed value is ${item.min}.`;
+      if (item.max !== null && num > item.max) return `Maximum allowed value is ${item.max}.`;
+    }
+
+    if (item.type === 'float') {
+      if (val === '' || val === null || val === undefined) return 'Numeric value is required.';
+      const num = Number(val);
+      if (isNaN(num)) return 'Must be a valid number.';
+      if (item.min !== null && num < item.min) return `Minimum allowed value is ${item.min}.`;
+      if (item.max !== null && num > item.max) return `Maximum allowed value is ${item.max}.`;
+    }
+
+    if (item.type === 'string') {
+      const str = String(val ?? '');
+      if (item.min !== null && str.length < item.min) return `Must be at least ${item.min} characters.`;
+      if (item.max !== null && str.length > item.max) return `Must be at most ${item.max} characters.`;
+      if (item.key === 'min_supported_mobile_version') {
+        if (!/^\d+\.\d+\.\d+$/.test(str)) return 'Must follow SemVer format (e.g. 1.0.0).';
+      }
+      if (item.key.includes('_url')) {
+        if (!str.startsWith('https://') && !str.startsWith('market://')) {
+          return 'URL must start with https:// or market://';
+        }
       }
     }
 
-    if (monetization.mode === 'free') {
-      if (monetization.free_daily_minute_cap !== '' && Number(monetization.free_daily_minute_cap) < 0) {
-        errors.free_daily_minute_cap = 'Daily minute cap cannot be negative.';
+    if (item.type === 'array' && item.key === 'subscription_plans') {
+      if (!Array.isArray(val) || val.length === 0) {
+        return 'At least one subscription plan is required.';
       }
-      if (monetization.free_trial_minutes_new_user !== '' && Number(monetization.free_trial_minutes_new_user) < 0) {
-        errors.free_trial_minutes_new_user = 'Trial minutes cannot be negative.';
+      for (let i = 0; i < val.length; i++) {
+        const p = val[i];
+        if (!p.name || !String(p.name).trim()) return `Plan #${i + 1}: Name is required.`;
+        if (p.price === '' || isNaN(Number(p.price)) || Number(p.price) < 0) {
+          return `Plan #${i + 1}: Price must be a non-negative number.`;
+        }
+        if (p.duration_days === '' || isNaN(Number(p.duration_days)) || Number(p.duration_days) < 1) {
+          return `Plan #${i + 1}: Duration must be at least 1 day.`;
+        }
       }
     }
 
-    if (monetization.mode === 'subscription') {
-      if (!monetization.subscription_plans || monetization.subscription_plans.length === 0) {
-        errors.subscription_plans = 'At least one subscription plan is required.';
+    return null;
+  };
+
+  // Handle value change for a setting
+  const handleValueChange = (key, rawValue) => {
+    const item = settingsByKey.get(key);
+    if (!item) return;
+
+    let parsedVal = rawValue;
+    if (item.type === 'integer') {
+      parsedVal = rawValue === '' ? '' : parseInt(rawValue, 10);
+    } else if (item.type === 'float') {
+      parsedVal = rawValue === '' ? '' : parseFloat(rawValue);
+    } else if (item.type === 'boolean') {
+      parsedVal = Boolean(rawValue);
+    }
+
+    // Client-side validation check
+    const error = validateField(item, parsedVal);
+    setClientErrors((prev) => {
+      const next = { ...prev };
+      if (error) {
+        next[key] = error;
       } else {
-        monetization.subscription_plans.forEach((plan, idx) => {
-          if (!plan.name || !plan.name.trim()) {
-            errors[`plan_${idx}_name`] = `Plan #${idx + 1} name is required.`;
-          }
-          if (plan.price === '' || Number(plan.price) < 0 || isNaN(Number(plan.price))) {
-            errors[`plan_${idx}_price`] = `Plan #${idx + 1} price cannot be negative.`;
-          }
-          if (plan.duration_days === '' || Number(plan.duration_days) < 1 || isNaN(Number(plan.duration_days))) {
-            errors[`plan_${idx}_duration`] = `Plan #${idx + 1} duration must be at least 1 day.`;
-          }
+        delete next[key];
+      }
+      return next;
+    });
+
+    // Check if the new value equals the original server current_value
+    const isSameAsCurrent =
+      item.type === 'array'
+        ? JSON.stringify(parsedVal) === JSON.stringify(item.current_value)
+        : parsedVal === item.current_value;
+
+    setPendingChanges((prev) => {
+      const next = { ...prev };
+      if (isSameAsCurrent) {
+        delete next[key];
+      } else {
+        next[key] = parsedVal;
+      }
+      return next;
+    });
+
+    // Clear server error when user modifies the field
+    setServerErrors((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  // Discard all unsaved changes
+  const handleDiscardAll = () => {
+    setPendingChanges({});
+    setClientErrors({});
+    setServerErrors({});
+    setSaveBanner({ type: 'info', message: 'All unsaved changes have been discarded.' });
+  };
+
+  // Identify critical changes that require confirmation modal
+  const checkCriticalChanges = () => {
+    const criticals = [];
+
+    // 1. maintenance_mode_enabled
+    if (pendingChanges.maintenance_mode_enabled !== undefined) {
+      const oldVal = settingsByKey.get('maintenance_mode_enabled')?.current_value;
+      const newVal = pendingChanges.maintenance_mode_enabled;
+      if (oldVal !== newVal) {
+        criticals.push({
+          key: 'maintenance_mode_enabled',
+          label: 'Maintenance Mode',
+          oldVal: String(oldVal),
+          newVal: String(newVal),
+          warning: newVal
+            ? 'Enabling maintenance mode will disconnect non-admin users and reject all incoming calls and logins.'
+            : 'Disabling maintenance mode will restore public access to all users.',
         });
       }
     }
 
-    // Matching settings validation (0 to 86400 seconds integer)
-    const cooldownVal = matchingSettings.cooldown_same_peer_seconds;
-    if (
-      cooldownVal === '' ||
-      isNaN(Number(cooldownVal)) ||
-      !Number.isInteger(Number(cooldownVal)) ||
-      Number(cooldownVal) < 0 ||
-      Number(cooldownVal) > 86400
-    ) {
-      errors.cooldown_same_peer_seconds = 'Cooldown must be an integer between 0 and 86400 seconds.';
+    // 2. monetization_mode
+    if (pendingChanges.monetization_mode !== undefined) {
+      const oldVal = settingsByKey.get('monetization_mode')?.current_value;
+      const newVal = pendingChanges.monetization_mode;
+      if (oldVal !== newVal) {
+        criticals.push({
+          key: 'monetization_mode',
+          label: 'Platform Monetization Mode',
+          oldVal: String(oldVal),
+          newVal: String(newVal),
+          warning: `Switching mode from "${oldVal}" to "${newVal}" changes billing requirements for all new calls.`,
+        });
+      }
     }
 
-    setValidationErrors(errors);
-    return Object.keys(errors).length === 0;
-  };
-
-  // Perform actual API persistence
-  const executeSave = async () => {
-    setSaving(true);
-    setErrorMsg('');
-    setSuccessMsg('');
-
-    try {
-      // 1. Update monetization settings
-      await apiClient.put(API_ENDPOINTS.SETTING_BY_KEY('monetization'), {
-        value_json: {
-          mode: monetization.mode,
-          per_minute_rate: Number(monetization.per_minute_rate) || 1.0,
-          currency: monetization.currency || 'INR',
-          minimum_balance: Number(monetization.minimum_balance) || 0.0,
-          free_trial_minutes_new_user: Number(monetization.free_trial_minutes_new_user) || 0,
-          free_daily_minute_cap: monetization.free_daily_minute_cap !== '' ? Number(monetization.free_daily_minute_cap) : null,
-          subscription_plans: monetization.subscription_plans,
-        },
-      });
-
-      // 2. Update auth settings (including mobile login toggle)
-      await apiClient.put(API_ENDPOINTS.SETTING_BY_KEY('auth_settings'), {
-        value_json: {
-          email_login_enabled: authSettings.email_login_enabled,
-          mobile_login_enabled: authSettings.mobile_login_enabled,
-          otp_expiry_seconds: Number(authSettings.otp_expiry_seconds) || 300,
-          max_otp_attempts: Number(authSettings.max_otp_attempts) || 3,
-        },
-      });
-
-      // 3. Update matching settings (including same-peer rematch cooldown)
-      await apiClient.put(API_ENDPOINTS.SETTING_BY_KEY('matching_settings'), {
-        value_json: {
-          ...matchingSettings,
-          cooldown_same_peer_seconds: Number(matchingSettings.cooldown_same_peer_seconds),
-        },
-      });
-
-      setSavedSettings({
-        monetization: { ...monetization },
-        auth_settings: { ...authSettings },
-        matching_settings: { ...matchingSettings },
-      });
-
-      setSuccessMsg('Settings saved successfully! New configurations apply immediately to all active and subsequent calls.');
-      setShowConfirmModal(false);
-    } catch (err) {
-      setErrorMsg(err.message || 'Failed to save settings. Please try again.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // Pre-save check: check validation and determine if mode confirmation is required
-  const handleSaveClick = (e) => {
-    e.preventDefault();
-    setErrorMsg('');
-    setSuccessMsg('');
-
-    if (!validateForm()) {
-      setErrorMsg('Please resolve input validation errors before saving.');
-      return;
+    // 3. min_supported_mobile_version
+    if (pendingChanges.min_supported_mobile_version !== undefined) {
+      const oldVal = settingsByKey.get('min_supported_mobile_version')?.current_value;
+      const newVal = pendingChanges.min_supported_mobile_version;
+      if (oldVal !== newVal) {
+        criticals.push({
+          key: 'min_supported_mobile_version',
+          label: 'Minimum Supported Mobile Version',
+          oldVal: String(oldVal),
+          newVal: String(newVal),
+          warning: `Mobile clients with versions below ${newVal} will be forced to update immediately.`,
+        });
+      }
     }
 
-    // Check if monetization mode was changed from the saved configuration
-    const modeChanged = savedSettings && savedSettings.monetization?.mode !== monetization.mode;
-
-    if (modeChanged) {
-      // Prompt confirmation dialog before executing
-      setShowConfirmModal(true);
-    } else {
-      executeSave();
+    // 4. user_registration_enabled set to false
+    if (pendingChanges.user_registration_enabled === false) {
+      const oldVal = settingsByKey.get('user_registration_enabled')?.current_value;
+      if (oldVal === true) {
+        criticals.push({
+          key: 'user_registration_enabled',
+          label: 'User Registration Enabled',
+          oldVal: 'true',
+          newVal: 'false',
+          warning: 'Disabling user registration will block all new users from creating accounts.',
+        });
+      }
     }
-  };
 
-  // Subscription plan handlers
-  const handleAddPlan = () => {
-    const newId = String(Date.now());
-    setMonetization((prev) => ({
-      ...prev,
-      subscription_plans: [
-        ...prev.subscription_plans,
-        { id: newId, name: 'New Plan', price: 99.0, duration_days: 30, daily_minute_cap: 0 },
-      ],
-    }));
-  };
-
-  const handleUpdatePlan = (index, field, value) => {
-    setMonetization((prev) => {
-      const updated = [...prev.subscription_plans];
-      updated[index] = { ...updated[index], [field]: value };
-      return { ...prev, subscription_plans: updated };
+    // 5. any Limits group value lowered by more than half (newValue < oldValue / 2)
+    Object.entries(pendingChanges).forEach(([key, newVal]) => {
+      const item = settingsByKey.get(key);
+      if (item && item.group === 'limits') {
+        const oldVal = Number(item.current_value);
+        const numNew = Number(newVal);
+        if (!isNaN(oldVal) && !isNaN(numNew) && oldVal > 0 && numNew < oldVal / 2) {
+          criticals.push({
+            key,
+            label: item.label,
+            oldVal: String(oldVal),
+            newVal: String(numNew),
+            warning: `Lowering this limit from ${oldVal} to ${numNew} (by more than 50%) may immediately throttle active traffic.`,
+          });
+        }
+      }
     });
+
+    return criticals;
   };
 
-  const handleRemovePlan = (index) => {
-    setMonetization((prev) => ({
-      ...prev,
-      subscription_plans: prev.subscription_plans.filter((_, i) => i !== index),
-    }));
-  };
+  // Trigger Save All flow
+  const handleInitiateSave = () => {
+    // 1. Check client validation errors
+    const errors = {};
+    Object.entries(pendingChanges).forEach(([key, val]) => {
+      const item = settingsByKey.get(key);
+      if (item) {
+        const err = validateField(item, val);
+        if (err) errors[key] = err;
+      }
+    });
 
-  // Strong password policy checks
-  const hasMinLength = passwordForm.new_password.length >= 12;
-  const hasUpper = /[A-Z]/.test(passwordForm.new_password);
-  const hasLower = /[a-z]/.test(passwordForm.new_password);
-  const hasDigit = /\d/.test(passwordForm.new_password);
-  const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]/.test(passwordForm.new_password);
-  const passwordsMatch = Boolean(passwordForm.new_password && passwordForm.new_password === passwordForm.confirm_password);
-  const isStrongPassword = hasMinLength && hasUpper && hasLower && hasDigit && hasSpecial && passwordsMatch;
-
-  const handleChangePassword = async (e) => {
-    e.preventDefault();
-    setPasswordError('');
-    setPasswordSuccess('');
-
-    if (!passwordForm.current_password) {
-      setPasswordError('Please provide your current admin password.');
+    if (Object.keys(errors).length > 0) {
+      setClientErrors(errors);
+      setSaveBanner({
+        type: 'error',
+        message: 'Please resolve client-side validation errors before saving.',
+      });
       return;
     }
 
-    if (!isStrongPassword) {
-      setPasswordError('New password must satisfy all security requirements (min 12 characters, uppercase, lowercase, number, symbol, and matching confirmation).');
+    // 2. Check critical changes
+    const criticals = checkCriticalChanges();
+    if (criticals.length > 0) {
+      setCriticalItems(criticals);
+      setShowCriticalModal(true);
       return;
     }
 
-    setPasswordSaving(true);
+    // 3. Execute save directly
+    executeSaveAll();
+  };
+
+  // Perform actual PUT requests per key
+  const executeSaveAll = async () => {
+    setShowCriticalModal(false);
+    setSaving(true);
+    setSaveBanner(null);
+
+    const keysToSave = Object.keys(pendingChanges);
+    const succeeded = [];
+    const failed = [];
+    const newServerErrors = {};
+
+    for (const key of keysToSave) {
+      const val = pendingChanges[key];
+      try {
+        await apiClient.put(API_ENDPOINTS.SETTING_BY_KEY(key), { value: val });
+        succeeded.push(key);
+      } catch (err) {
+        failed.push(key);
+        newServerErrors[key] = err.message || 'Failed to update setting.';
+      }
+    }
+
+    setServerErrors(newServerErrors);
+
+    // Update pending changes: remove succeeded keys, keep failed keys
+    setPendingChanges((prev) => {
+      const next = { ...prev };
+      succeeded.forEach((k) => delete next[k]);
+      return next;
+    });
+
+    // Refresh settings from server to sync all latest values and overridden markers
+    await fetchSettingsAndStatus();
+
+    setSaving(false);
+
+    if (failed.length === 0) {
+      setSaveBanner({
+        type: 'success',
+        message: `Successfully saved ${succeeded.length} setting(s). All updates are live.`,
+      });
+    } else {
+      setSaveBanner({
+        type: 'warning',
+        message: `Saved ${succeeded.length} setting(s). Failed to save ${failed.length} setting(s): see field errors below.`,
+      });
+    }
+  };
+
+  // Reset a setting to default via DELETE /admin/settings/:key
+  const handleResetSetting = async (key) => {
+    const item = settingsByKey.get(key);
+    if (!item) return;
+
+    setResettingKey(key);
+    setSaveBanner(null);
     try {
-      await apiClient.patch(API_ENDPOINTS.CHANGE_PASSWORD, {
-        current_password: passwordForm.current_password,
-        new_password: passwordForm.new_password,
+      const result = await apiClient.delete(API_ENDPOINTS.SETTING_BY_KEY(key));
+      // Clear pending change & error for this key
+      setPendingChanges((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setClientErrors((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setServerErrors((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
       });
 
-      setPasswordSuccess('Admin password updated successfully. The new strong password is now active.');
-      setPasswordForm({
-        current_password: '',
-        new_password: '',
-        confirm_password: '',
+      // Update in local settings list
+      setSettingsList((prev) =>
+        prev.map((s) =>
+          s.key === key
+            ? {
+                ...s,
+                current_value: result.default_value !== undefined ? result.default_value : s.default,
+                is_overridden: false,
+              }
+            : s
+        )
+      );
+
+      setSaveBanner({
+        type: 'success',
+        message: `Reset "${item.label}" to default value (${formatValueDisplay(item.default)}).`,
       });
     } catch (err) {
-      setPasswordError(err.message || 'Failed to update admin password.');
+      setSaveBanner({
+        type: 'error',
+        message: `Failed to reset "${item.label}": ${err.message}`,
+      });
     } finally {
-      setPasswordSaving(false);
+      setResettingKey(null);
     }
   };
 
-  if (loading) {
+  // Determine effective monetization mode for conditional dimming
+  const effectiveMonetizationMode =
+    pendingChanges.monetization_mode !== undefined
+      ? pendingChanges.monetization_mode
+      : settingsByKey.get('monetization_mode')?.current_value || 'free';
+
+  // Render Loading State
+  if (loading && settingsList.length === 0) {
     return (
-      <div className="page-container">
-        <div className="state-card state-loading">
+      <div className="settings-page-container">
+        <div className="auth-loading-screen" style={{ height: '60vh' }}>
           <div className="auth-spinner"></div>
-          <h3>Loading Platform Configuration</h3>
-          <p>Retrieving active monetization rules and system settings from database...</p>
+          <p>Loading platform configuration settings...</p>
         </div>
       </div>
     );
   }
 
-  if (errorMsg && !savedSettings) {
+  // Render Critical Load Error State
+  if (loadError && settingsList.length === 0) {
     return (
-      <div className="page-container">
-        <div className="state-card state-error">
-          <span className="state-icon">⚠️</span>
+      <div className="settings-page-container">
+        <div className="settings-error-card">
+          <div className="error-icon">⚠️</div>
           <h3>Unable to Load Settings</h3>
-          <p>{errorMsg}</p>
-          <button type="button" className="btn-primary" onClick={fetchSettings}>
+          <p>{loadError}</p>
+          <button type="button" className="btn-primary" onClick={fetchSettingsAndStatus}>
             🔄 Retry Loading Settings
           </button>
         </div>
@@ -377,685 +617,850 @@ export function SettingsPage() {
     );
   }
 
-  const oldModeName = MODES.find((m) => m.id === savedSettings?.monetization?.mode)?.name || 'Previous Mode';
-  const newModeName = MODES.find((m) => m.id === monetization.mode)?.name || monetization.mode;
-
   return (
-    <div className="page-container">
+    <div className="settings-page-container">
       {/* Page Header */}
       <div className="page-header">
-        <h1 className="page-title">Settings</h1>
-        <p className="page-subtitle">Configure monetization rules, call billing rates, and authentication providers</p>
-      </div>
-
-      {/* Success Notification */}
-      {successMsg && (
-        <div className="alert-banner alert-success" role="alert">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-            <polyline points="22 4 12 14.01 9 11.01"></polyline>
-          </svg>
-          <div className="alert-content">
-            <span className="alert-title">Success</span>
-            <span className="alert-text">{successMsg}</span>
-          </div>
-          <button className="alert-close" onClick={() => setSuccessMsg('')} aria-label="Dismiss">✕</button>
-        </div>
-      )}
-
-      {/* Error Notification */}
-      {errorMsg && (
-        <div className="alert-banner alert-danger" role="alert">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="12" y1="8" x2="12" y2="12"></line>
-            <line x1="12" y1="16" x2="12.01" y2="16"></line>
-          </svg>
-          <div className="alert-content">
-            <span className="alert-title">Configuration Error</span>
-            <span className="alert-text">{errorMsg}</span>
-          </div>
-          <button className="alert-close" onClick={() => setErrorMsg('')} aria-label="Dismiss">✕</button>
-        </div>
-      )}
-
-      <form onSubmit={handleSaveClick}>
-        {/* ================================================================= */}
-        {/* 1. Monetization Mode Selector */}
-        {/* ================================================================= */}
-        <section className="settings-section">
-          <div className="section-header">
-            <h2 className="section-title">Platform Monetization Model</h2>
-            <p className="section-desc">Select how anonymous callers are billed. Only parameters relevant to the active model will be used.</p>
-          </div>
-
-          <div className="mode-selector-grid">
-            {MODES.map((mode) => {
-              const isSelected = monetization.mode === mode.id;
-              return (
-                <div
-                  key={mode.id}
-                  className={`mode-card ${isSelected ? 'mode-card-selected' : ''}`}
-                  onClick={() => setMonetization((prev) => ({ ...prev, mode: mode.id }))}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === ' ' || e.key === 'Enter') {
-                      setMonetization((prev) => ({ ...prev, mode: mode.id }));
-                    }
-                  }}
-                >
-                  <div className="mode-card-header">
-                    <span className="mode-icon">{mode.icon}</span>
-                    <span className={`mode-badge ${isSelected ? 'badge-primary' : 'badge-neutral'}`}>
-                      {isSelected ? 'Active Mode' : 'Select'}
-                    </span>
-                  </div>
-                  <h3 className="mode-card-title">{mode.name}</h3>
-                  <span className="mode-card-tagline">{mode.tagline}</span>
-                  <p className="mode-card-desc">{mode.description}</p>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Conditional Parameter Fields based on Selected Mode */}
-          <div className="mode-details-panel">
-            {/* ---------------- Mode 1: Free Mode ---------------- */}
-            {monetization.mode === 'free' && (
-              <div className="mode-fields-group">
-                <div className="mode-info-alert">
-                  <div className="info-icon">ℹ️</div>
-                  <div>
-                    <strong>Free Calling Active:</strong> Users do not need wallets, payment methods, or subscriptions. Calls connect freely with optional safety rate limits.
-                  </div>
-                </div>
-
-                <div className="form-grid-2">
-                  <div className="form-group">
-                    <label htmlFor="free-trial-mins">
-                      Free Trial Minutes for New Users
-                      <span className="label-help">Initial credited allowance on registration</span>
-                    </label>
-                    <input
-                      id="free-trial-mins"
-                      type="number"
-                      min="0"
-                      className={`form-input ${validationErrors.free_trial_minutes_new_user ? 'input-error' : ''}`}
-                      value={monetization.free_trial_minutes_new_user}
-                      onChange={(e) => setMonetization((prev) => ({ ...prev, free_trial_minutes_new_user: e.target.value }))}
-                    />
-                    {validationErrors.free_trial_minutes_new_user && (
-                      <span className="form-error-text">{validationErrors.free_trial_minutes_new_user}</span>
-                    )}
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="free-daily-cap">
-                      Free Daily Minute Cap (Per Caller)
-                      <span className="label-help">Max daily free minutes allowed (0 or empty = unlimited)</span>
-                    </label>
-                    <input
-                      id="free-daily-cap"
-                      type="number"
-                      min="0"
-                      className={`form-input ${validationErrors.free_daily_minute_cap ? 'input-error' : ''}`}
-                      value={monetization.free_daily_minute_cap}
-                      onChange={(e) => setMonetization((prev) => ({ ...prev, free_daily_minute_cap: e.target.value }))}
-                    />
-                    {validationErrors.free_daily_minute_cap && (
-                      <span className="form-error-text">{validationErrors.free_daily_minute_cap}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ---------------- Mode 2: Subscription Mode ---------------- */}
-            {monetization.mode === 'subscription' && (
-              <div className="mode-fields-group">
-                <div className="mode-info-alert">
-                  <div className="info-icon">💳</div>
-                  <div>
-                    <strong>Subscription Required:</strong> Callers must subscribe to one of the active plans listed below to place outgoing audio calls. Callees receive calls free.
-                  </div>
-                </div>
-
-                <div className="plans-editor-header">
-                  <div>
-                    <h4 className="plans-heading">Available Subscription Plans</h4>
-                    <p className="plans-subheading">Configure packages presented to callers for membership purchase</p>
-                  </div>
-                  <button type="button" className="btn-secondary btn-sm" onClick={handleAddPlan}>
-                    + Add Plan
-                  </button>
-                </div>
-
-                {validationErrors.subscription_plans && (
-                  <span className="form-error-text" style={{ marginBottom: '12px', display: 'block' }}>
-                    {validationErrors.subscription_plans}
-                  </span>
-                )}
-
-                <div className="plans-table-container">
-                  <table className="settings-table">
-                    <thead>
-                      <tr>
-                        <th>Plan Name</th>
-                        <th>Price (₹ / INR)</th>
-                        <th>Duration (Days)</th>
-                        <th>Daily Cap (Mins, 0 = No Cap)</th>
-                        <th style={{ width: '80px', textAlign: 'center' }}>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monetization.subscription_plans.map((plan, idx) => (
-                        <tr key={plan.id || idx}>
-                          <td>
-                            <input
-                              type="text"
-                              className={`form-input form-input-sm ${validationErrors[`plan_${idx}_name`] ? 'input-error' : ''}`}
-                              value={plan.name}
-                              placeholder="e.g. Monthly Unlimited"
-                              onChange={(e) => handleUpdatePlan(idx, 'name', e.target.value)}
-                            />
-                            {validationErrors[`plan_${idx}_name`] && (
-                              <span className="form-error-text">{validationErrors[`plan_${idx}_name`]}</span>
-                            )}
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              className={`form-input form-input-sm ${validationErrors[`plan_${idx}_price`] ? 'input-error' : ''}`}
-                              value={plan.price}
-                              placeholder="0.00"
-                              onChange={(e) => handleUpdatePlan(idx, 'price', e.target.value)}
-                            />
-                            {validationErrors[`plan_${idx}_price`] && (
-                              <span className="form-error-text">{validationErrors[`plan_${idx}_price`]}</span>
-                            )}
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="1"
-                              className={`form-input form-input-sm ${validationErrors[`plan_${idx}_duration`] ? 'input-error' : ''}`}
-                              value={plan.duration_days}
-                              placeholder="30"
-                              onChange={(e) => handleUpdatePlan(idx, 'duration_days', e.target.value)}
-                            />
-                            {validationErrors[`plan_${idx}_duration`] && (
-                              <span className="form-error-text">{validationErrors[`plan_${idx}_duration`]}</span>
-                            )}
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="0"
-                              className="form-input form-input-sm"
-                              value={plan.daily_minute_cap || 0}
-                              placeholder="0"
-                              onChange={(e) => handleUpdatePlan(idx, 'daily_minute_cap', e.target.value)}
-                            />
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <button
-                              type="button"
-                              className="btn-danger-icon"
-                              title="Delete Plan"
-                              onClick={() => handleRemovePlan(idx)}
-                              disabled={monetization.subscription_plans.length <= 1}
-                            >
-                              🗑️
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* ---------------- Mode 3: Per-Minute Mode ---------------- */}
-            {monetization.mode === 'per_minute' && (
-              <div className="mode-fields-group">
-                <div className="mode-info-alert">
-                  <div className="info-icon">⏱️</div>
-                  <div>
-                    <strong>Per-Minute Billing Active:</strong> Callers are debited every 60 seconds from their prepaid wallet balance. If balance exhausts, the call terminates automatically.
-                  </div>
-                </div>
-
-                <div className="form-grid-3">
-                  <div className="form-group">
-                    <label htmlFor="per-minute-rate">
-                      Per-Minute Rate (₹ / min)
-                      <span className="label-help">Amount debited each active call minute</span>
-                    </label>
-                    <div className="input-prefix-wrapper">
-                      <span className="input-prefix">₹</span>
-                      <input
-                        id="per-minute-rate"
-                        type="number"
-                        min="0"
-                        step="0.10"
-                        className={`form-input ${validationErrors.per_minute_rate ? 'input-error' : ''}`}
-                        value={monetization.per_minute_rate}
-                        onChange={(e) => setMonetization((prev) => ({ ...prev, per_minute_rate: e.target.value }))}
-                      />
-                    </div>
-                    {validationErrors.per_minute_rate && (
-                      <span className="form-error-text">{validationErrors.per_minute_rate}</span>
-                    )}
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="min-balance">
-                      Minimum Balance Required
-                      <span className="label-help">Minimum wallet amount to start a call</span>
-                    </label>
-                    <div className="input-prefix-wrapper">
-                      <span className="input-prefix">₹</span>
-                      <input
-                        id="min-balance"
-                        type="number"
-                        min="0"
-                        step="0.50"
-                        className={`form-input ${validationErrors.minimum_balance ? 'input-error' : ''}`}
-                        value={monetization.minimum_balance}
-                        onChange={(e) => setMonetization((prev) => ({ ...prev, minimum_balance: e.target.value }))}
-                      />
-                    </div>
-                    {validationErrors.minimum_balance && (
-                      <span className="form-error-text">{validationErrors.minimum_balance}</span>
-                    )}
-                  </div>
-
-                  <div className="form-group">
-                    <label htmlFor="currency-code">
-                      Currency Code
-                      <span className="label-help">ISO-4217 Currency symbol</span>
-                    </label>
-                    <input
-                      id="currency-code"
-                      type="text"
-                      className="form-input"
-                      value={monetization.currency}
-                      onChange={(e) => setMonetization((prev) => ({ ...prev, currency: e.target.value.toUpperCase() }))}
-                      maxLength={3}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* ================================================================= */}
-        {/* 2. Authentication & Mobile Login Toggle */}
-        {/* ================================================================= */}
-        <section className="settings-section">
-          <div className="section-header">
-            <h2 className="section-title">Authentication & Login Controls</h2>
-            <p className="section-desc">Manage permitted registration and sign-in channels for mobile clients.</p>
-          </div>
-
-          <div className="settings-card">
-            {/* Mobile Login Toggle with SMS Cost Warning */}
-            <div className="toggle-row">
-              <div className="toggle-info">
-                <div className="toggle-title-line">
-                  <span className="toggle-title">Allow Mobile Phone OTP Login</span>
-                  <span className={`status-pill ${authSettings.mobile_login_enabled ? 'pill-warning' : 'pill-neutral'}`}>
-                    {authSettings.mobile_login_enabled ? 'Enabled' : 'Disabled (Default MVP)'}
-                  </span>
-                </div>
-                <p className="toggle-desc">
-                  When enabled, mobile users can request a one-time SMS verification code to register or authenticate.
-                </p>
-
-                {/* Prominent SMS Cost Warning */}
-                <div className="sms-cost-warning-box">
-                  <div className="warning-icon">⚠️</div>
-                  <div className="warning-text">
-                    <strong>Direct SMS Gateway Cost Notice:</strong>
-                    <p>
-                      Every SMS OTP sent incurs a monetary cost from your telephony carrier or SMS API provider (e.g., Twilio, AWS SNS, Fast2SMS).
-                      Keep this setting <strong>disabled</strong> during test and development phases to avoid unintended balance drain.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="toggle-switch-wrapper">
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    id="mobile-login-toggle"
-                    checked={authSettings.mobile_login_enabled}
-                    onChange={(e) => setAuthSettings((prev) => ({ ...prev, mobile_login_enabled: e.target.checked }))}
-                  />
-                  <span className="slider round"></span>
-                </label>
-              </div>
-            </div>
-
-            {/* Email / Password Status (Standard) */}
-            <div className="toggle-row border-top">
-              <div className="toggle-info">
-                <div className="toggle-title-line">
-                  <span className="toggle-title">Email & Password Authentication</span>
-                  <span className="status-pill pill-success">Always Enabled</span>
-                </div>
-                <p className="toggle-desc">
-                  Primary anonymous auth method. Fast, zero-cost, and secure with bcrypt and JWT rotation.
-                </p>
-              </div>
-              <div className="toggle-switch-wrapper">
-                <label className="switch switch-disabled">
-                  <input type="checkbox" checked={true} disabled />
-                  <span className="slider round"></span>
-                </label>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ================================================================= */}
-        {/* 3. Matching Section */}
-        {/* ================================================================= */}
-        <section className="settings-section">
-          <div className="section-header">
-            <h2 className="section-title">Matching</h2>
-            <p className="section-desc">Configure peer matching rules, rematch cooldowns, and pairing thresholds.</p>
-          </div>
-
-          <div className="settings-card">
-            <div className="form-group" style={{ maxWidth: '540px' }}>
-              <label htmlFor="cooldown-same-peer">
-                Don't re-match the same two users for N seconds
-                <span className="label-help">
-                  0 = allow immediate rematch. Higher values reduce repeat matches but can cause 'no users available' when few users are online.
-                </span>
-              </label>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
-                <input
-                  id="cooldown-same-peer"
-                  type="number"
-                  min="0"
-                  max="86400"
-                  step="1"
-                  className={`form-input ${validationErrors.cooldown_same_peer_seconds ? 'input-error' : ''}`}
-                  value={matchingSettings.cooldown_same_peer_seconds}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setMatchingSettings((prev) => ({ ...prev, cooldown_same_peer_seconds: val }));
-                    if (validationErrors.cooldown_same_peer_seconds) {
-                      setValidationErrors((prev) => {
-                        const updated = { ...prev };
-                        delete updated.cooldown_same_peer_seconds;
-                        return updated;
-                      });
-                    }
-                  }}
-                  style={{ width: '160px' }}
-                />
-                <span style={{ color: '#94a3b8', fontSize: '14px' }}>seconds</span>
-
-                {savedSettings?.matching_settings?.cooldown_same_peer_seconds !== undefined && (
-                  <span style={{ color: '#64748b', fontSize: '13px', marginLeft: 'auto' }}>
-                    Saved value: <strong>{savedSettings.matching_settings.cooldown_same_peer_seconds}s</strong>
-                  </span>
-                )}
-              </div>
-
-              {validationErrors.cooldown_same_peer_seconds && (
-                <span className="form-error-text" style={{ marginTop: '6px', display: 'block' }}>
-                  {validationErrors.cooldown_same_peer_seconds}
-                </span>
-              )}
-
-              {/* Quick preset buttons: 0, 30s, 60s, 5 min, 30 min */}
-              <div style={{ marginTop: '14px' }}>
-                <span style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginBottom: '8px' }}>
-                  Quick Presets:
-                </span>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                  {[
-                    { label: '0 (Allow immediate rematch)', value: 0 },
-                    { label: '30s', value: 30 },
-                    { label: '60s', value: 60 },
-                    { label: '5 min', value: 300 },
-                    { label: '30 min', value: 1800 },
-                  ].map((preset) => {
-                    const isSelected = Number(matchingSettings.cooldown_same_peer_seconds) === preset.value && matchingSettings.cooldown_same_peer_seconds !== '';
-                    return (
-                      <button
-                        key={preset.value}
-                        type="button"
-                        onClick={() => {
-                          setMatchingSettings((prev) => ({ ...prev, cooldown_same_peer_seconds: preset.value }));
-                          setValidationErrors((prev) => {
-                            const updated = { ...prev };
-                            delete updated.cooldown_same_peer_seconds;
-                            return updated;
-                          });
-                        }}
-                        style={{
-                          padding: '6px 12px',
-                          fontSize: '12px',
-                          fontWeight: '600',
-                          borderRadius: '6px',
-                          border: isSelected ? '1px solid #3b82f6' : '1px solid #334155',
-                          background: isSelected ? '#1d4ed8' : '#1e293b',
-                          color: isSelected ? '#ffffff' : '#cbd5e1',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Save & Action Footer Bar */}
-        <div className="settings-action-bar">
-          <div className="action-summary">
-            {savedSettings && savedSettings.monetization?.mode !== monetization.mode && (
-              <span className="mode-change-badge">
-                ⚠️ Mode change pending: <strong>{oldModeName}</strong> ➔ <strong>{newModeName}</strong>
-              </span>
-            )}
-          </div>
-
-          <div className="action-buttons">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={fetchSettings}
-              disabled={saving}
-            >
-              Discard Changes
-            </button>
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={saving}
-              id="save-settings-btn"
-            >
-              {saving ? 'Saving Changes...' : 'Save Settings'}
-            </button>
-          </div>
-        </div>
-      </form>
-
-      {/* ================================================================= */}
-      {/* 3. Administrator Security & Strong Password Policy */}
-      {/* ================================================================= */}
-      <section className="settings-section" style={{ marginTop: '32px' }}>
-        <div className="section-header">
-          <h2 className="section-title">Administrator Security & Password Policy</h2>
-          <p className="section-desc">
-            Enforces strict password hygiene. Admin credentials require minimum 12 characters, uppercase, lowercase, numbers, and symbols.
+        <div>
+          <h1 className="page-title">Platform Settings</h1>
+          <p className="page-subtitle">
+            Configure system parameters, monetization, matching thresholds, moderation limits, and compliance URLs.
           </p>
         </div>
-
-        {passwordSuccess && (
-          <div className="alert-banner alert-success" role="alert" style={{ marginBottom: '16px' }}>
-            <div className="alert-content">
-              <span className="alert-title">Password Updated</span>
-              <span className="alert-text">{passwordSuccess}</span>
-            </div>
-            <button className="alert-close" onClick={() => setPasswordSuccess('')} aria-label="Dismiss">✕</button>
-          </div>
-        )}
-
-        {passwordError && (
-          <div className="alert-banner alert-danger" role="alert" style={{ marginBottom: '16px' }}>
-            <div className="alert-content">
-              <span className="alert-title">Password Policy Error</span>
-              <span className="alert-text">{passwordError}</span>
-            </div>
-            <button className="alert-close" onClick={() => setPasswordError('')} aria-label="Dismiss">✕</button>
-          </div>
-        )}
-
-        <div className="settings-card">
-          <form onSubmit={handleChangePassword}>
-            <div className="form-grid-2">
-              <div className="form-group">
-                <label htmlFor="current-admin-pass">Current Password</label>
-                <input
-                  id="current-admin-pass"
-                  type="password"
-                  className="form-input"
-                  placeholder="Enter current password"
-                  value={passwordForm.current_password}
-                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, current_password: e.target.value }))}
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="form-grid-2" style={{ marginTop: '12px' }}>
-              <div className="form-group">
-                <label htmlFor="new-admin-pass">New Admin Password</label>
-                <input
-                  id="new-admin-pass"
-                  type="password"
-                  className="form-input"
-                  placeholder="At least 12 characters"
-                  value={passwordForm.new_password}
-                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, new_password: e.target.value }))}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="confirm-admin-pass">Confirm New Password</label>
-                <input
-                  id="confirm-admin-pass"
-                  type="password"
-                  className="form-input"
-                  placeholder="Re-type new password"
-                  value={passwordForm.confirm_password}
-                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, confirm_password: e.target.value }))}
-                  required
-                />
-              </div>
-            </div>
-
-            {/* Live Password Policy Checklist */}
-            <div style={{ marginTop: '14px', padding: '12px', background: '#0f172a', borderRadius: '8px', border: '1px solid #1e293b' }}>
-              <span style={{ fontSize: '12px', fontWeight: '700', color: '#94a3b8', display: 'block', marginBottom: '8px' }}>
-                Strong Password Requirements:
-              </span>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '6px', fontSize: '12px' }}>
-                <span style={{ color: hasMinLength ? '#22c55e' : '#64748b' }}>
-                  {hasMinLength ? '✓' : '○'} At least 12 characters
-                </span>
-                <span style={{ color: hasUpper ? '#22c55e' : '#64748b' }}>
-                  {hasUpper ? '✓' : '○'} One uppercase letter (A-Z)
-                </span>
-                <span style={{ color: hasLower ? '#22c55e' : '#64748b' }}>
-                  {hasLower ? '✓' : '○'} One lowercase letter (a-z)
-                </span>
-                <span style={{ color: hasDigit ? '#22c55e' : '#64748b' }}>
-                  {hasDigit ? '✓' : '○'} One number (0-9)
-                </span>
-                <span style={{ color: hasSpecial ? '#22c55e' : '#64748b' }}>
-                  {hasSpecial ? '✓' : '○'} One symbol (!@#$%^&*)
-                </span>
-                <span style={{ color: passwordsMatch ? '#22c55e' : '#64748b' }}>
-                  {passwordsMatch ? '✓' : '○'} Passwords match
-                </span>
-              </div>
-            </div>
-
-            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={passwordSaving || !isStrongPassword}
-              >
-                {passwordSaving ? 'Updating Password...' : 'Update Admin Password'}
-              </button>
-            </div>
-          </form>
+        <div className="page-header-actions">
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={fetchSettingsAndStatus}
+            disabled={saving || loading}
+            title="Reload settings from database"
+          >
+            🔄 Refresh
+          </button>
         </div>
-      </section>
+      </div>
 
-      {/* ================================================================= */}
-      {/* 4. Confirmation Modal for Monetization Mode Change */}
-      {/* ================================================================= */}
-      {showConfirmModal && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-          <div className="modal-card">
+      {/* Global Save / Feedback Banner */}
+      {saveBanner && (
+        <div className={`settings-banner banner-${saveBanner.type}`}>
+          <span className="banner-icon">
+            {saveBanner.type === 'success' && '✓'}
+            {saveBanner.type === 'error' && '✕'}
+            {saveBanner.type === 'warning' && '⚠'}
+            {saveBanner.type === 'info' && 'ℹ'}
+          </span>
+          <span className="banner-text">{saveBanner.message}</span>
+          <button
+            type="button"
+            className="banner-close-btn"
+            onClick={() => setSaveBanner(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Horizontal Scrolling Tabs */}
+      <div className="settings-tabs-wrapper">
+        <div className="settings-tabs-container">
+          {tabs.map((tab) => {
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                className={`settings-tab-btn ${isActive ? 'active' : ''}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Active Tab Content */}
+      <div className="settings-tab-content">
+        {activeTab === 'history' ? (
+          <HistoryTab
+            historyItems={historyItems}
+            loading={historyLoading}
+            error={historyError}
+            pagination={historyPagination}
+            settingsByKey={settingsByKey}
+            filterKey={historyFilterKey}
+            startDate={historyStartDate}
+            endDate={historyEndDate}
+            onFilterKeyChange={(k) => {
+              setHistoryFilterKey(k);
+              setHistoryPagination((p) => ({ ...p, page: 1 }));
+            }}
+            onStartDateChange={(d) => {
+              setHistoryStartDate(d);
+              setHistoryPagination((p) => ({ ...p, page: 1 }));
+            }}
+            onEndDateChange={(d) => {
+              setHistoryEndDate(d);
+              setHistoryPagination((p) => ({ ...p, page: 1 }));
+            }}
+            onPageChange={(newPage) => {
+              setHistoryPagination((p) => ({ ...p, page: newPage }));
+            }}
+            onRefresh={fetchHistory}
+          />
+        ) : (
+          <GroupSettingsTab
+            groupId={activeTab}
+            settingsList={settingsList.filter((s) => s.group === activeTab)}
+            pendingChanges={pendingChanges}
+            clientErrors={clientErrors}
+            serverErrors={serverErrors}
+            systemStatus={systemStatus}
+            resettingKey={resettingKey}
+            effectiveMonetizationMode={effectiveMonetizationMode}
+            onValueChange={handleValueChange}
+            onResetSetting={handleResetSetting}
+          />
+        )}
+      </div>
+
+      {/* Sticky Unsaved Changes Bar */}
+      {unsavedCount > 0 && (
+        <div className="sticky-unsaved-bar">
+          <div className="unsaved-info">
+            <span className="unsaved-badge">{unsavedCount}</span>
+            <span>
+              Unsaved change{unsavedCount > 1 ? 's' : ''} pending review and deployment.
+            </span>
+          </div>
+          <div className="unsaved-actions">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={handleDiscardAll}
+              disabled={saving}
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              className="btn-primary btn-sm"
+              onClick={handleInitiateSave}
+              disabled={saving || Object.keys(clientErrors).length > 0}
+            >
+              {saving ? 'Deploying Changes...' : `Save All (${unsavedCount})`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Critical Changes Confirmation Modal */}
+      {showCriticalModal && (
+        <div className="modal-backdrop">
+          <div className="modal-card modal-critical">
             <div className="modal-header">
-              <div className="modal-icon-warning">⚠️</div>
-              <h3 id="modal-title" className="modal-title">Confirm Monetization Mode Change</h3>
+              <span className="modal-icon-warning">⚠️</span>
+              <h3 className="modal-title">Confirm Critical System Changes</h3>
             </div>
-
             <div className="modal-body">
               <p>
-                You are about to change the platform monetization model from{' '}
-                <span className="mode-highlight">{oldModeName}</span> to{' '}
-                <span className="mode-highlight">{newModeName}</span>.
+                The following modifications involve sensitive platform behaviors, billing modes, or service limits. Please review them carefully before deploying:
               </p>
-              <div className="modal-callout">
-                <strong>Important:</strong> This change updates the database instantly. All newly initiated calls and active callers will immediately be evaluated under <strong>{newModeName}</strong> rules.
+              <div className="critical-items-list">
+                {criticalItems.map((item) => (
+                  <div key={item.key} className="critical-item-card">
+                    <div className="critical-item-header">
+                      <strong>{item.label}</strong>
+                      <code className="key-code">{item.key}</code>
+                    </div>
+                    <div className="critical-diff-row">
+                      <span className="diff-badge diff-old">Previous: {item.oldVal}</span>
+                      <span className="diff-arrow">→</span>
+                      <span className="diff-badge diff-new">New: {item.newVal}</span>
+                    </div>
+                    <p className="critical-warning-text">{item.warning}</p>
+                  </div>
+                ))}
               </div>
             </div>
-
             <div className="modal-footer">
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => setShowConfirmModal(false)}
+                onClick={() => setShowCriticalModal(false)}
                 disabled={saving}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="btn-danger-primary"
-                onClick={executeSave}
+                className="btn-danger"
+                onClick={executeSaveAll}
                 disabled={saving}
               >
-                {saving ? 'Applying Change...' : 'Confirm & Apply Mode Change'}
+                {saving ? 'Applying...' : 'Confirm & Save All Changes'}
               </button>
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Settings Tab Component for a specific group
+ */
+function GroupSettingsTab({
+  groupId,
+  settingsList,
+  pendingChanges,
+  clientErrors,
+  serverErrors,
+  systemStatus,
+  resettingKey,
+  effectiveMonetizationMode,
+  onValueChange,
+  onResetSetting,
+}) {
+  return (
+    <div className="settings-group-tab">
+      {/* Special Read-Only Fields and Informational Banners */}
+      {groupId === 'billing' && (
+        <div className="settings-card info-card" style={{ marginBottom: '16px' }}>
+          <div className="setting-header">
+            <div>
+              <div className="setting-title-row">
+                <span className="setting-label">Platform Currency</span>
+                <span className="badge badge-neutral">INR (fixed)</span>
+                <span className="badge badge-private">Private</span>
+              </div>
+              <p className="setting-help">Platform billing operates exclusively in Indian Rupee (INR) by policy.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {groupId === 'legal' && (
+        <div className="settings-card info-card" style={{ marginBottom: '16px' }}>
+          <div className="setting-header">
+            <div>
+              <div className="setting-title-row">
+                <span className="setting-label">Minimum Registration Age</span>
+                <span className="badge badge-neutral">18 (fixed by policy)</span>
+                <span className="badge badge-public">Public</span>
+              </div>
+              <p className="setting-help">Age requirement fixed at 18+ by platform safety and legal policy.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Render all settings in this group */}
+      {settingsList.map((item) => {
+        // Special rendering for subscription_plans array table editor
+        if (item.key === 'subscription_plans') {
+          const isDimmed = effectiveMonetizationMode !== 'subscription';
+          return (
+            <SubscriptionPlansEditor
+              key={item.key}
+              item={item}
+              currentValue={pendingChanges[item.key] !== undefined ? pendingChanges[item.key] : item.current_value}
+              isOverridden={
+                pendingChanges[item.key] !== undefined
+                  ? JSON.stringify(pendingChanges[item.key]) !== JSON.stringify(item.default)
+                  : item.is_overridden
+              }
+              isDimmed={isDimmed}
+              effectiveMode={effectiveMonetizationMode}
+              clientError={clientErrors[item.key]}
+              serverError={serverErrors[item.key]}
+              isResetting={resettingKey === item.key}
+              onChange={(val) => onValueChange(item.key, val)}
+              onReset={() => onResetSetting(item.key)}
+            />
+          );
+        }
+
+        // Conditional dimming for per-minute billing fields when mode is not per_minute
+        const isDimmedPerMinute =
+          groupId === 'billing' &&
+          (item.key === 'billing_rate_per_minute' || item.key === 'billing_minimum_balance') &&
+          effectiveMonetizationMode !== 'per_minute';
+
+        return (
+          <SettingRow
+            key={item.key}
+            item={item}
+            pendingValue={pendingChanges[item.key]}
+            clientError={clientErrors[item.key]}
+            serverError={serverErrors[item.key]}
+            systemStatus={systemStatus}
+            isResetting={resettingKey === item.key}
+            isDimmed={isDimmedPerMinute}
+            effectiveMode={effectiveMonetizationMode}
+            onChange={(val) => onValueChange(item.key, val)}
+            onReset={() => onResetSetting(item.key)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Single Setting Row Component
+ */
+function SettingRow({
+  item,
+  pendingValue,
+  clientError,
+  serverError,
+  systemStatus,
+  isResetting,
+  isDimmed,
+  effectiveMode,
+  onChange,
+  onReset,
+}) {
+  const currentValue = pendingValue !== undefined ? pendingValue : item.current_value;
+
+  // Check if overridden compared to default
+  const isOverridden =
+    pendingValue !== undefined
+      ? pendingValue !== item.default
+      : item.is_overridden;
+
+  // Is at default value right now (for reset button disable state)
+  const isAtDefault = currentValue === item.default && !item.is_overridden;
+
+  // Amber warning conditions
+  let amberWarning = null;
+  if (item.key === 'cooldown_same_peer_seconds' && Number(currentValue) > 3600) {
+    amberWarning = 'High values increase waiting time when few users are online.';
+  } else if (item.key === 'ring_timeout_seconds' && Number(currentValue) > 60) {
+    amberWarning = 'High ring timeout may cause callers to wait too long for unresponsive peers.';
+  } else if (item.key === 'max_call_duration_seconds' && Number(currentValue) < 600) {
+    amberWarning = 'Short call duration (< 10 minutes) may prematurely truncate conversations.';
+  }
+
+  // Mobile login SMS provider check
+  const isMobileLogin = item.key === 'mobile_login_enabled';
+  const isProd = systemStatus.environment === 'production';
+  const smsConfigured = Boolean(systemStatus.sms_provider_configured);
+  const mobileLoginDisabledByEnv = isMobileLogin && isProd && !smsConfigured;
+
+  return (
+    <div className={`settings-card setting-row-card ${isDimmed ? 'settings-card-dimmed' : ''}`}>
+      <div className="setting-header">
+        <div className="setting-info">
+          <div className="setting-title-row">
+            <span className="setting-label">{item.label}</span>
+            <code className="key-code">{item.key}</code>
+
+            {/* Scope Badge */}
+            <span className={`badge ${item.public ? 'badge-public' : 'badge-private'}`}>
+              {item.public ? 'Public' : 'Private'}
+            </span>
+
+            {/* Overridden Marker */}
+            {isOverridden && (
+              <span className="badge badge-overridden" title="Setting has custom value different from factory default">
+                Overridden
+              </span>
+            )}
+
+            {/* Inactive Mode Dimming Badge */}
+            {isDimmed && (
+              <span className="badge badge-neutral" title="Inactive under current monetization mode">
+                Inactive in {effectiveMode} mode
+              </span>
+            )}
+          </div>
+
+          <p className="setting-help">{item.help}</p>
+
+          {/* Min / Max / Default Badge */}
+          <div className="setting-metadata-row">
+            <span className="metadata-badge">
+              {item.min !== null && item.min !== undefined && `Min ${item.min} | `}
+              {item.max !== null && item.max !== undefined && `Max ${item.max} | `}
+              Default: {formatValueDisplay(item.default)}
+              {item.unit ? ` (${item.unit})` : ''}
+            </span>
+
+            {/* SMS Provider Status Badge for mobile_login_enabled */}
+            {isMobileLogin && (
+              <span
+                className={`sms-status-badge ${smsConfigured ? 'sms-configured' : 'sms-not-configured'}`}
+              >
+                {smsConfigured ? '✓ SMS gateway: configured' : '⚠ SMS gateway: not configured'}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Action: Reset Button */}
+        <div className="setting-reset-action">
+          <button
+            type="button"
+            className="btn-reset"
+            onClick={onReset}
+            disabled={isAtDefault || isResetting}
+            title={isAtDefault ? 'Already at factory default' : `Reset to default (${formatValueDisplay(item.default)})`}
+          >
+            {isResetting ? 'Resetting...' : 'Reset'}
+          </button>
+        </div>
+      </div>
+
+      {/* Control Input Area */}
+      <div className="setting-control-area">
+        {/* Boolean Toggle Switch */}
+        {item.type === 'boolean' && (
+          <div className="toggle-wrapper">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={Boolean(currentValue)}
+                disabled={mobileLoginDisabledByEnv}
+                onChange={(e) => onChange(e.target.checked)}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-state-label">
+              {currentValue ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+        )}
+
+        {/* Integer or Float Input */}
+        {(item.type === 'integer' || item.type === 'float') && (
+          <div className="number-input-group">
+            <input
+              type="number"
+              className="form-control"
+              value={currentValue !== undefined && currentValue !== null ? currentValue : ''}
+              step={item.type === 'float' ? '0.01' : '1'}
+              min={item.min !== null ? item.min : undefined}
+              max={item.max !== null ? item.max : undefined}
+              onChange={(e) => onChange(e.target.value)}
+            />
+            {item.unit && <span className="input-unit-label">{item.unit}</span>}
+          </div>
+        )}
+
+        {/* Enum Select Dropdown */}
+        {item.type === 'enum' && (
+          <div className="select-wrapper">
+            <select
+              className="form-control"
+              value={currentValue || ''}
+              onChange={(e) => onChange(e.target.value)}
+            >
+              {item.key === 'monetization_mode' ? (
+                <>
+                  <option value="free">Free (Zero Cost)</option>
+                  <option value="subscription">Subscription (Tiered Plans)</option>
+                  <option value="per_minute">Per-Minute Rate (Pay-As-You-Go)</option>
+                </>
+              ) : (
+                <option value={currentValue}>{currentValue}</option>
+              )}
+            </select>
+          </div>
+        )}
+
+        {/* String Input */}
+        {item.type === 'string' && (
+          <div className="string-input-group">
+            <input
+              type={item.key.includes('_url') ? 'url' : 'text'}
+              className="form-control"
+              value={currentValue || ''}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          </div>
+        )}
+
+        {/* Quick Presets for cooldown_same_peer_seconds */}
+        {item.key === 'cooldown_same_peer_seconds' && (
+          <div className="quick-presets-row">
+            <span className="preset-label">Presets:</span>
+            {COOLDOWN_PRESETS.map((p) => {
+              const isSelected = Number(currentValue) === p.value;
+              return (
+                <button
+                  key={p.value}
+                  type="button"
+                  className={`quick-preset-btn ${isSelected ? 'active' : ''}`}
+                  onClick={() => onChange(p.value)}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Production SMS Error Explanation */}
+        {mobileLoginDisabledByEnv && (
+          <p className="field-error-text">
+            Cannot enable mobile login in production: No SMS provider configured. Configure TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in environment variables.
+          </p>
+        )}
+
+        {/* Client Validation Error */}
+        {clientError && <p className="field-error-text">{clientError}</p>}
+
+        {/* Server Save Error */}
+        {serverError && <p className="field-error-text server-error">Server rejected: {serverError}</p>}
+
+        {/* Amber Non-Blocking Warning */}
+        {amberWarning && (
+          <div className="settings-amber-warning">
+            <span className="warning-icon">⚠️</span>
+            <span>{amberWarning}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Subscription Plans Table Editor for Billing Tab
+ */
+function SubscriptionPlansEditor({
+  item,
+  currentValue,
+  isOverridden,
+  isDimmed,
+  effectiveMode,
+  clientError,
+  serverError,
+  isResetting,
+  onChange,
+  onReset,
+}) {
+  const plans = Array.isArray(currentValue) ? currentValue : [];
+
+  const handleUpdatePlan = (index, field, val) => {
+    const updated = plans.map((p, idx) => {
+      if (idx !== index) return p;
+      return {
+        ...p,
+        [field]: field === 'active' ? Boolean(val) : val,
+      };
+    });
+    onChange(updated);
+  };
+
+  const handleAddPlan = () => {
+    const newPlan = {
+      id: String(Date.now()),
+      name: `Plan ${plans.length + 1}`,
+      price: 99,
+      duration_days: 30,
+      active: true,
+    };
+    onChange([...plans, newPlan]);
+  };
+
+  const handleDeletePlan = (index) => {
+    const updated = plans.filter((_, idx) => idx !== index);
+    onChange(updated);
+  };
+
+  return (
+    <div className={`settings-card ${isDimmed ? 'settings-card-dimmed' : ''}`}>
+      <div className="setting-header">
+        <div>
+          <div className="setting-title-row">
+            <span className="setting-label">{item.label}</span>
+            <code className="key-code">{item.key}</code>
+            <span className="badge badge-public">Public</span>
+            {isOverridden && <span className="badge badge-overridden">Overridden</span>}
+            {isDimmed && (
+              <span className="badge badge-neutral">Inactive in {effectiveMode} mode</span>
+            )}
+          </div>
+          <p className="setting-help">{item.help}</p>
+        </div>
+        <div className="setting-reset-action">
+          <button
+            type="button"
+            className="btn-reset"
+            onClick={onReset}
+            disabled={!isOverridden || isResetting}
+          >
+            {isResetting ? 'Resetting...' : 'Reset'}
+          </button>
+        </div>
+      </div>
+
+      {/* Plans Table */}
+      <div className="plans-table-container">
+        <table className="plans-table">
+          <thead>
+            <tr>
+              <th>Plan Name</th>
+              <th>Price (₹ INR)</th>
+              <th>Duration (Days)</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {plans.map((plan, index) => (
+              <tr key={plan.id || index}>
+                <td>
+                  <input
+                    type="text"
+                    className="form-control"
+                    value={plan.name || ''}
+                    placeholder="e.g. Starter Pass"
+                    onChange={(e) => handleUpdatePlan(index, 'name', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    className="form-control"
+                    value={plan.price !== undefined ? plan.price : ''}
+                    min="0"
+                    step="1"
+                    onChange={(e) => handleUpdatePlan(index, 'price', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    className="form-control"
+                    value={plan.duration_days !== undefined ? plan.duration_days : ''}
+                    min="1"
+                    step="1"
+                    onChange={(e) => handleUpdatePlan(index, 'duration_days', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(plan.active)}
+                      onChange={(e) => handleUpdatePlan(index, 'active', e.target.checked)}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                  <span style={{ marginLeft: '8px', fontSize: '0.85rem' }}>
+                    {plan.active ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className="btn-delete-row"
+                    onClick={() => handleDeletePlan(index)}
+                    title="Remove subscription plan"
+                  >
+                    🗑
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="plans-table-actions">
+          <button type="button" className="btn-secondary btn-sm" onClick={handleAddPlan}>
+            + Add New Plan
+          </button>
+        </div>
+
+        {clientError && <p className="field-error-text">{clientError}</p>}
+        {serverError && <p className="field-error-text server-error">{serverError}</p>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Settings Audit History Tab Component
+ */
+function HistoryTab({
+  historyItems,
+  loading,
+  error,
+  pagination,
+  settingsByKey,
+  filterKey,
+  startDate,
+  endDate,
+  onFilterKeyChange,
+  onStartDateChange,
+  onEndDateChange,
+  onPageChange,
+  onRefresh,
+}) {
+  const allKeys = Array.from(settingsByKey.keys()).sort();
+
+  return (
+    <div className="history-tab-container">
+      {/* Filters Bar */}
+      <div className="history-filters-bar">
+        <div className="filter-group">
+          <label htmlFor="history-key-filter">Setting Key:</label>
+          <select
+            id="history-key-filter"
+            className="form-control"
+            value={filterKey}
+            onChange={(e) => onFilterKeyChange(e.target.value)}
+          >
+            <option value="">All Settings (Show All)</option>
+            {allKeys.map((k) => {
+              const label = settingsByKey.get(k)?.label || k;
+              return (
+                <option key={k} value={k}>
+                  {label} ({k})
+                </option>
+              );
+            })}
+          </select>
+        </div>
+
+        <div className="filter-group">
+          <label htmlFor="history-start-date">From Date:</label>
+          <input
+            id="history-start-date"
+            type="date"
+            className="form-control"
+            value={startDate}
+            onChange={(e) => onStartDateChange(e.target.value)}
+          />
+        </div>
+
+        <div className="filter-group">
+          <label htmlFor="history-end-date">To Date:</label>
+          <input
+            id="history-end-date"
+            type="date"
+            className="form-control"
+            value={endDate}
+            onChange={(e) => onEndDateChange(e.target.value)}
+          />
+        </div>
+
+        {(filterKey || startDate || endDate) && (
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={() => {
+              onFilterKeyChange('');
+              onStartDateChange('');
+              onEndDateChange('');
+            }}
+          >
+            Clear Filters
+          </button>
+        )}
+
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          style={{ marginLeft: 'auto' }}
+          onClick={onRefresh}
+          disabled={loading}
+        >
+          🔄 Refresh
+        </button>
+      </div>
+
+      {/* Error state */}
+      {error && (
+        <div className="settings-banner banner-error">
+          <span className="banner-icon">✕</span>
+          <span className="banner-text">{error}</span>
+        </div>
+      )}
+
+      {/* Loading state */}
+      {loading && historyItems.length === 0 ? (
+        <div className="auth-loading-screen" style={{ height: '30vh' }}>
+          <div className="auth-spinner"></div>
+          <p>Loading settings audit history...</p>
+        </div>
+      ) : historyItems.length === 0 ? (
+        <div className="history-empty-state">
+          <p>No audit history records found matching your filters.</p>
+        </div>
+      ) : (
+        <>
+          <div className="history-table-container">
+            <table className="history-table">
+              <thead>
+                <tr>
+                  <th>Timestamp (IST)</th>
+                  <th>Admin</th>
+                  <th>Setting</th>
+                  <th>Value Change (Diff)</th>
+                  <th>IP Address</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyItems.map((row) => {
+                  const item = settingsByKey.get(row.key);
+                  const label = item ? item.label : row.key;
+                  return (
+                    <tr key={row.id}>
+                      <td className="history-timestamp">{formatIST(row.created_at)}</td>
+                      <td className="history-admin">{row.admin_email || row.admin_id || 'System'}</td>
+                      <td className="history-setting">
+                        <strong>{label}</strong>
+                        <br />
+                        <code className="key-code">{row.key}</code>
+                      </td>
+                      <td className="history-diff">
+                        <span className="diff-badge diff-old">
+                          {formatValueDisplay(row.old_value)}
+                        </span>
+                        <span className="diff-arrow"> → </span>
+                        <span className="diff-badge diff-new">
+                          {formatValueDisplay(row.new_value)}
+                        </span>
+                      </td>
+                      <td className="history-ip">{row.ip_address || '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination Controls */}
+          <div className="history-pagination">
+            <span>
+              Page {pagination.page} of {pagination.totalPages} ({pagination.total} total records)
+            </span>
+            <div className="pagination-buttons">
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={pagination.page <= 1 || loading}
+                onClick={() => onPageChange(pagination.page - 1)}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={pagination.page >= pagination.totalPages || loading}
+                onClick={() => onPageChange(pagination.page + 1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

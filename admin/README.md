@@ -68,10 +68,36 @@ Admin login requires authorized administrator credentials configured in the back
 | :--- | :--- | :--- |
 | **Login** | `/login` | Secure administrator authentication with email, password, and optional TOTP MFA. |
 | **Dashboard** | `/` | Real-time platform KPI metrics: total registered users, users available now (live indicator), calls today, average call duration, and revenue (when paid mode is active). Includes real-time sockets and safety alerts. |
-| **Settings** | `/settings` | Global monetization selector (**Free**, **Subscription**, **Per-minute**). Renders only fields relevant to active mode. Mobile SMS OTP login toggle with telephony gateway cost notice. Confirmation modal on monetization model change. |
+| **Settings** | `/settings` | Central platform settings registry organized into dynamic tabs: **System**, **Auth & OTP**, **Matching & Calls**, **Billing**, **Moderation**, **Limits**, **Retention**, **Legal & Text**, plus an **Audit History** tab. Features client-side validation, sticky unsaved changes bar, per-key result reporting, critical change confirmation modals, non-blocking amber warnings, cooldown quick presets, SMS provider verification, subscription plan table editor, and immutable audit logs. |
 | **Users** | `/users` | Searchable, paginated user accounts table. Displays live availability status (`Available` green dot vs `Offline` gray dot), reports count, wallet balances, and administrative **Ban** / **Unban** actions. |
 | **Reports** | `/reports` | Abuse moderation queue filterable by status (`pending`, `reviewed`, `resolved`, `dismissed`). Review complaint reasons, user notes, and perform **Mark Reviewed** or **Ban User** enforcement. |
 | **Call Logs** | `/call-logs` | Historical call session records with date/time, duration, end reason, and anonymous session IDs. **Strict privacy:** No audio files exist and no user identities are exposed. |
+
+---
+
+## ⚙️ Platform Settings Management
+
+The settings system connects to the unified Settings Registry API (`/admin/settings`, `/admin/settings/:key`, `/admin/settings/history`, `/admin/settings/status`):
+
+### 1. Dynamic Tabs & Groups
+Settings returned from `GET /admin/settings` are automatically partitioned into tabbed views by `group`:
+- **System**: Maintenance mode, maintenance banner copy, minimum mobile SemVer (`1.0.0`), and store update URL.
+- **Auth & OTP**: User registration toggle, email/password login toggle, mobile SMS OTP toggle (with telephony provider status check), password length, and OTP expiry/attempt parameters.
+- **Matching & Calls**: Same-peer rematch cooldown (with quick presets `0`, `30s`, `60s`, `5 min`, `30 min` and amber warning for > 1 hour), ring timeout, max match attempts, live presence preference, max call duration, network disconnect grace period, and trial minute limits.
+- **Billing**: Platform currency (`INR (fixed)` read-only indicator), monetization mode (`free`, `subscription`, `per_minute`), per-minute rate and minimum balance (dimmed when mode != per_minute), and subscription packages table editor (dimmed when mode != subscription).
+- **Moderation**: Auto-flag and auto-suspend thresholds, lookback windows, suspension duration, and automated spam report filtering.
+- **Limits**: Authentication, API, matching, abuse reporting, and WebSocket rate limits and malformed event caps.
+- **Retention**: User availability grace period and call session history retention.
+- **Legal & Text**: Minimum registration age (`18 (fixed by policy)` read-only indicator), terms of service and privacy policy URLs, version strings, and push notification copy.
+- **Audit History**: Paginated, filterable table of historical configuration changes formatted in `Asia/Kolkata` (`IST`), recording admin email, setting key, old/new diffs, and IP addresses.
+- **Future Groups**: Any unknown future groups returned by the API automatically render as extra tabs before History.
+
+### 2. Safeguards & UX Features
+- **Client & Server Validation**: Real-time validation against min/max/type metadata from the API. Detailed server error messages are rendered inline next to failed fields.
+- **Sticky Unsaved Changes Bar**: Displays count of modified settings, with "Save All" and "Discard" actions and browser leave (`beforeunload`) warnings.
+- **Critical Changes Modal**: Prompts for confirmation with previous vs. proposed values before applying sensitive changes (e.g. maintenance mode, monetization mode, forced client updates, disabling user registration, or reducing rate limits by > 50%).
+- **Reset to Factory Default**: Each setting has a dedicated Reset action calling `DELETE /admin/settings/:key` (disabled when already at default value).
+- **Zero Raw HTML Injection**: All inputs and diffs are rendered with standard JSX to prevent XSS. Secrets and API keys are never exposed in settings payloads.
 
 ---
 

@@ -5,6 +5,9 @@ import {
   changeAdminPassword,
   getSettings,
   updateSetting,
+  resetSetting,
+  getSettingsHistory,
+  getSettingsStatus,
   listUsers,
   updateUserStatus,
   listReports,
@@ -29,9 +32,12 @@ router.use(authenticateAdmin);
 // 6.1b Admin Password Update (Enforces strong password policy & revokes refresh tokens)
 router.patch('/auth/password', changeAdminPassword);
 
-// 6.2 Settings (Get & Update monetization mode, mobile login toggle, rates, etc.)
+// 6.2 Settings (Get, Update, Reset, History, Status)
+router.get('/settings/history', getSettingsHistory);
+router.get('/settings/status', getSettingsStatus);
 router.get('/settings', getSettings);
 router.put('/settings/:key', updateSetting);
+router.delete('/settings/:key', resetSetting);
 
 // 6.3 User Management
 router.get('/users', listUsers);

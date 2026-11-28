@@ -22,8 +22,23 @@ import {
   isCallBillingTimerActive,
 } from '../services/billing.service.js';
 import { socketAbuseGuard } from './socketAbuseGuard.js';
+import { settingsRegistry, compareSemver } from '../services/settings.service.js';
+import { registerModerationIO } from '../services/moderation.service.js';
 
 let ioInstance = null;
+
+function getDisconnectGracePeriod() {
+  if (process.env.NETWORK_DISCONNECT_GRACE_PERIOD_SECONDS !== undefined) {
+    return Number(process.env.NETWORK_DISCONNECT_GRACE_PERIOD_SECONDS);
+  }
+  if (settingsRegistry.hasOverride('network_disconnect_grace_period_seconds')) {
+    return Number(settingsRegistry.get('network_disconnect_grace_period_seconds'));
+  }
+  if (process.env.NODE_ENV === 'test') {
+    return 0;
+  }
+  return Number(settingsRegistry.get('network_disconnect_grace_period_seconds') ?? 5);
+}
 
 /**
  * Initialize Socket.io on the provided HTTP server
@@ -105,6 +120,14 @@ export function initSocketServer(httpServer) {
       }
     }
 
+    // Clear disconnect grace timer if user reconnects to active call
+    const activeSessionForReconnect = callSessionManager.getSessionByUserId(userId);
+    if (activeSessionForReconnect) {
+      callSessionManager.clearDisconnectTimer(activeSessionForReconnect.callCode, userId);
+      socket.join(`call:${activeSessionForReconnect.callCode}`);
+      logger.debug(`User ${userId} reconnected to active call [callCode: ${activeSessionForReconnect.callCode}]`);
+    }
+
     // Track user socket in memory map
     userSocketMap.set(userId, socket.id);
     // Join personal room for targeted emits by userId
@@ -183,14 +206,15 @@ export function initSocketServer(httpServer) {
           return ack({ error: 'Forbidden' });
         }
         const elapsed = (Date.now() - memSession.requestedAt) / 1000;
-        const status = memSession.status === 'ringing' && elapsed > 30 ? 'missed' : memSession.status;
+        const ringLimit = Number(memSession.ringTimeoutMs ? memSession.ringTimeoutMs / 1000 : settingsRegistry.get('ring_timeout_seconds') || 30);
+        const status = memSession.status === 'ringing' && elapsed > ringLimit ? 'missed' : memSession.status;
         return ack({ status });
       }
 
       // Fallback to database
       try {
         const { rows } = await pool.query(
-          `SELECT id, caller_id, callee_id, status, end_reason, requested_at
+          `SELECT id, caller_id, callee_id, status, end_reason, requested_at, snapshot_ring_timeout
            FROM call_sessions
            WHERE id = $1`,
           [sessionId]
@@ -208,7 +232,8 @@ export function initSocketServer(httpServer) {
         let status = dbSession.status;
         if (status === 'ringing') {
           const elapsed = (Date.now() - new Date(dbSession.requested_at).getTime()) / 1000;
-          status = elapsed > 30 ? 'missed' : 'ringing';
+          const ringLimit = Number(dbSession.snapshot_ring_timeout || settingsRegistry.get('ring_timeout_seconds') || 30);
+          status = elapsed > ringLimit ? 'missed' : 'ringing';
         } else if (status === 'missed' || dbSession.end_reason === 'ring_timeout') {
           status = 'missed';
         } else {
@@ -239,6 +264,52 @@ export function initSocketServer(httpServer) {
     // -----------------------------------------------------------------------
     const handleCallFind = async (payload, callback) => {
       const ack = typeof payload === 'function' ? payload : typeof callback === 'function' ? callback : null;
+
+      // Check app version gating
+      const clientVersion =
+        (payload && typeof payload === 'object' && payload.appVersion) ||
+        socket.handshake.headers?.['x-app-version'] ||
+        socket.handshake.auth?.appVersion;
+
+      if (clientVersion) {
+        const minVersion = settingsRegistry.get('min_supported_mobile_version');
+        if (minVersion && compareSemver(clientVersion, minVersion) < 0) {
+          const errorData = {
+            reason: 'update_required',
+            error: 'update_required',
+            message: 'Please update the app to continue',
+            min_version: minVersion,
+            force_update_url: settingsRegistry.get('force_update_store_url_android'),
+          };
+          socket.emit(SOCKET_EVENTS.CALL_ERROR, errorData);
+          if (ack) {
+            return ack({
+              success: false,
+              ...errorData,
+            });
+          }
+          return;
+        }
+      }
+
+      // Check maintenance mode
+      if (settingsRegistry.get('maintenance_mode_enabled')) {
+        const maintenanceMsg =
+          settingsRegistry.get('maintenance_mode_message') || 'Service is temporarily down for maintenance';
+        const errorData = {
+          reason: 'maintenance',
+          error: 'maintenance',
+          message: maintenanceMsg,
+        };
+        socket.emit(SOCKET_EVENTS.CALL_ERROR, errorData);
+        if (ack) {
+          return ack({
+            success: false,
+            ...errorData,
+          });
+        }
+        return;
+      }
 
       // 0. Check if user already has an active session in-memory
       const existingSession = callSessionManager.getSessionByUserId(userId);
@@ -340,14 +411,19 @@ export function initSocketServer(httpServer) {
         const { session, callee } = matchResult;
         logger.debug(`Call matched [callCode: ${session.callCode}]`);
 
-        // Register session in in-memory CallSessionManager with a 30s ringing timeout
+        const ringTimeoutSec = Number(session.snapshotRingTimeout || settingsRegistry.get('ring_timeout_seconds') || 30);
+        const ringTimeoutMs = ringTimeoutSec * 1000;
+        const snapMaxDuration = Number(session.snapshotMaxDuration || settingsRegistry.get('max_call_duration_seconds') || 3600);
+
+        // Register session in in-memory CallSessionManager with snapshotted ring timeout and max duration
         callSessionManager.createSession({
           sessionId: session.id,
           callCode: session.callCode,
           callerId: userId,
           calleeId: callee.id,
           billingMode: session.billingMode,
-          ringTimeoutMs: 30000,
+          ringTimeoutMs,
+          snapshotMaxDuration: snapMaxDuration,
           onRingTimeout: async (s) => {
             try {
               logger.debug(`Ring timeout reached [callCode: ${s.callCode}]`);
@@ -377,6 +453,31 @@ export function initSocketServer(httpServer) {
               logger.error('Error handling ringing timeout:', err.message);
             }
           },
+          onMaxDuration: async (s) => {
+            try {
+              logger.info(`Max duration reached [callCode: ${s.callCode}, limit: ${s.snapshotMaxDuration}s]`);
+              const res = await endCall({ callCode: s.callCode, reason: 'max_duration' });
+              const endPayload = {
+                callCode: s.callCode,
+                durationSeconds: res.durationSeconds || s.snapshotMaxDuration,
+                reason: 'max_duration',
+              };
+
+              io.to(`call:${s.callCode}`).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+
+              const callerSockId = userSocketMap.getSocketId(s.callerId);
+              if (callerSockId) {
+                io.to(callerSockId).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+              }
+
+              const calleeSockId = userSocketMap.getSocketId(s.calleeId);
+              if (calleeSockId) {
+                io.to(calleeSockId).emit(SOCKET_EVENTS.CALL_ENDED, endPayload);
+              }
+            } catch (err) {
+              logger.error('Error handling max call duration:', err.message);
+            }
+          },
         });
 
         // Join caller to isolated session room
@@ -388,6 +489,7 @@ export function initSocketServer(httpServer) {
           callCode: session.callCode,
           status: session.status,
           role: 'caller',
+          ring_timeout_seconds: ringTimeoutSec,
         };
 
         socket.emit(SOCKET_EVENTS.CALL_RINGING, callerPayload);
@@ -404,7 +506,8 @@ export function initSocketServer(httpServer) {
           io.to(calleeSocketId).emit(SOCKET_EVENTS.CALL_INCOMING, {
             sessionId: session.id,
             callCode: session.callCode,
-            ringSeconds: 30,
+            ringSeconds: ringTimeoutSec,
+            ring_timeout_seconds: ringTimeoutSec,
             role: 'callee',
           });
           logger.debug(`Incoming emitted [callCode: ${session.callCode}]`);
@@ -486,12 +589,14 @@ export function initSocketServer(httpServer) {
         return;
       }
 
-      // Both clients receive call:matched with ephemeral STUN/TURN ICE config
+      // Both clients receive call:matched with ephemeral STUN/TURN ICE config and disconnect grace window
+      const gracePeriodSec = getDisconnectGracePeriod();
       const callerPayload = {
         callCode,
         sessionId: res.sessionId,
         role: 'caller',
         iceServers: res.iceServers,
+        network_disconnect_grace_period_seconds: gracePeriodSec,
       };
 
       const calleePayload = {
@@ -499,6 +604,7 @@ export function initSocketServer(httpServer) {
         sessionId: res.sessionId,
         role: 'callee',
         iceServers: res.iceServers,
+        network_disconnect_grace_period_seconds: gracePeriodSec,
       };
 
       const callerSocketId = userSocketMap.getSocketId(res.callerId);
@@ -628,6 +734,9 @@ export function initSocketServer(httpServer) {
         return;
       }
 
+      // Clear any pending disconnect grace timer since participant is actively relaying
+      callSessionManager.clearDisconnectTimer(callCode, userId);
+
       const peerUserId = callSessionManager.getPeerUserId(callCode, userId);
       if (!peerUserId) return;
 
@@ -729,7 +838,7 @@ export function initSocketServer(httpServer) {
       if (session && session.status === 'ringing' && !session.connectedAt) {
         const isCaller = session.callerId === userId;
         let endReason = isCaller ? 'caller_left' : (reason || 'callee_hangup');
-        const allowedReasons = ['caller_hangup', 'callee_hangup', 'declined', 'ring_timeout', 'skipped', 'balance_exhausted', 'network_error', 'system_shutdown', 'caller_left', 'cancelled'];
+        const allowedReasons = ['caller_hangup', 'callee_hangup', 'declined', 'ring_timeout', 'skipped', 'balance_exhausted', 'network_error', 'system_shutdown', 'caller_left', 'cancelled', 'max_duration'];
         if (!allowedReasons.includes(endReason)) {
           endReason = isCaller ? 'caller_left' : 'callee_hangup';
         }
@@ -973,25 +1082,58 @@ export function initSocketServer(httpServer) {
           // Connected session:
           logger.debug(`User disconnected during connected call [callCode: ${activeSession.callCode}]`);
 
-          try {
-            const res = await endCall({
-              callCode: activeSession.callCode,
+          const gracePeriodSec = getDisconnectGracePeriod();
+          if (gracePeriodSec > 0) {
+            logger.debug(`Starting disconnect grace period (${gracePeriodSec}s) for user ${userId} in call ${activeSession.callCode}`);
+            callSessionManager.startDisconnectTimer(
+              activeSession.callCode,
               userId,
-              reason: 'network_error',
-            });
+              gracePeriodSec * 1000,
+              async () => {
+                logger.debug(`Disconnect grace expired for user ${userId} in call ${activeSession.callCode}`);
+                try {
+                  const res = await endCall({
+                    callCode: activeSession.callCode,
+                    userId,
+                    reason: 'network_error',
+                  });
 
-            const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
-            const peerSocketId = userSocketMap.getSocketId(peerUserId);
+                  const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+                  const peerSocketId = userSocketMap.getSocketId(peerUserId);
 
-            if (peerSocketId) {
-              io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                  if (peerSocketId) {
+                    io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                      callCode: activeSession.callCode,
+                      durationSeconds: res.durationSeconds,
+                      reason: 'network_error',
+                    });
+                  }
+                } catch (err) {
+                  logger.error('Error handling disconnect mid-call after grace period:', err.message);
+                }
+              }
+            );
+          } else {
+            try {
+              const res = await endCall({
                 callCode: activeSession.callCode,
-                durationSeconds: res.durationSeconds,
+                userId,
                 reason: 'network_error',
               });
+
+              const peerUserId = activeSession.callerId === userId ? activeSession.calleeId : activeSession.callerId;
+              const peerSocketId = userSocketMap.getSocketId(peerUserId);
+
+              if (peerSocketId) {
+                io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+                  callCode: activeSession.callCode,
+                  durationSeconds: res.durationSeconds,
+                  reason: 'network_error',
+                });
+              }
+            } catch (err) {
+              logger.error('Error handling disconnect mid-call:', err.message);
             }
-          } catch (err) {
-            logger.error('Error handling disconnect mid-call:', err.message);
           }
         }
       }
@@ -999,6 +1141,7 @@ export function initSocketServer(httpServer) {
   });
 
   ioInstance = io;
+  registerModerationIO(getIO);
   return io;
 }
 

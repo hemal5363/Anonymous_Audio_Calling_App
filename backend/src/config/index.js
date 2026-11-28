@@ -282,4 +282,12 @@ export const config = {
       return Number(process.env.ADMIN_LOCKOUT_MINUTES || parsed.data.ADMIN_LOCKOUT_MINUTES);
     },
   },
+  get smsProviderConfigured() {
+    return Boolean(
+      process.env.SMS_GATEWAY_API_KEY ||
+      process.env.TWILIO_AUTH_TOKEN ||
+      process.env.TWILIO_ACCOUNT_SID ||
+      process.env.SMS_PROVIDER_API_KEY
+    );
+  },
 };

@@ -1,5 +1,20 @@
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
+import { settingsRegistry } from '../services/settings.service.js';
+
+function resolveSocketLimit(key, envName, fallback) {
+  if (settingsRegistry.hasOverride && settingsRegistry.hasOverride(key)) {
+    return Number(settingsRegistry.get(key));
+  }
+  if (process.env[envName] !== undefined && process.env[envName] !== '') {
+    return Number(process.env[envName]);
+  }
+  try {
+    return Number(settingsRegistry.get(key));
+  } catch (_) {
+    return Number(fallback);
+  }
+}
 
 /**
  * SocketAbuseGuard
@@ -44,9 +59,13 @@ class SocketAbuseGuard {
 
     const windowMs = 60 * 1000; // 1 minute sliding window
     let maxAllowed = 60;
-    if (action === 'callFind') maxAllowed = config.socketAbuse.callFindMax;
-    else if (action === 'signal') maxAllowed = config.socketAbuse.signalMax;
-    else if (action === 'accept') maxAllowed = config.socketAbuse.acceptMax;
+    if (action === 'callFind') {
+      maxAllowed = resolveSocketLimit('socket_rate_limit_call_find_max', 'SOCKET_RATE_LIMIT_CALL_FIND_MAX', config.socketAbuse.callFindMax);
+    } else if (action === 'signal') {
+      maxAllowed = resolveSocketLimit('socket_rate_limit_signal_max', 'SOCKET_RATE_LIMIT_SIGNAL_MAX', config.socketAbuse.signalMax);
+    } else if (action === 'accept') {
+      maxAllowed = resolveSocketLimit('socket_rate_limit_accept_max', 'SOCKET_RATE_LIMIT_ACCEPT_MAX', config.socketAbuse.acceptMax);
+    }
 
     userLimits[action] = this._pruneTimestamps(userLimits[action], windowMs);
 
@@ -88,8 +107,8 @@ class SocketAbuseGuard {
     if (!userId) return { triggered: false, cooldownSeconds: 0 };
 
     const windowMs = config.socketAbuse.skipCancelWindowMs;
-    const threshold = config.socketAbuse.skipCancelThreshold;
-    const cooldownMs = config.socketAbuse.skipCancelCooldownMs;
+    const threshold = resolveSocketLimit('socket_skip_cancel_threshold', 'SOCKET_SKIP_CANCEL_THRESHOLD', config.socketAbuse.skipCancelThreshold);
+    const cooldownMs = resolveSocketLimit('socket_skip_cancel_cooldown_ms', 'SOCKET_SKIP_CANCEL_COOLDOWN_MS', config.socketAbuse.skipCancelCooldownMs);
 
     let timestamps = this.skipCancelTimestamps.get(userId) || [];
     timestamps = this._pruneTimestamps(timestamps, windowMs);
@@ -116,7 +135,7 @@ class SocketAbuseGuard {
   recordMalformedEvent(socketId) {
     if (!socketId) return { shouldDisconnect: false, count: 0 };
 
-    const maxMalformed = config.socketAbuse.maxMalformedEvents;
+    const maxMalformed = resolveSocketLimit('socket_max_malformed_events', 'SOCKET_MAX_MALFORMED_EVENTS', config.socketAbuse.maxMalformedEvents);
     const current = (this.malformedCounters.get(socketId) || 0) + 1;
     this.malformedCounters.set(socketId, current);
 

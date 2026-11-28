@@ -1,7 +1,12 @@
 import { io, Socket } from 'socket.io-client';
 import { API_URL } from '../config';
+import { APP_VERSION } from '../config/constants';
 import { tokenStorage } from '../auth/tokenStorage';
 import { handleSessionExpired } from '../api/client';
+import {
+  triggerGlobalUpdateRequired,
+  triggerGlobalMaintenance,
+} from '../config/PublicConfigContext';
 
 /**
  * Socket.IO event names matching backend implementation and docs/CALL_FLOW.md
@@ -102,12 +107,18 @@ export async function connectSocket(): Promise<Socket | null> {
 
   if (socketInstance) {
     // Update auth and headers on existing socket instance
-    socketInstance.auth = { token: formattedToken };
+    socketInstance.auth = { token: formattedToken, appVersion: APP_VERSION };
     if ((socketInstance.io as any)?.opts) {
       (socketInstance.io as any).opts.transports = ['polling', 'websocket'];
       (socketInstance.io as any).opts.tryAllTransports = true;
-      (socketInstance.io as any).opts.extraHeaders = { Authorization: formattedToken };
-      (socketInstance.io as any).opts.query = { token: formattedToken };
+      (socketInstance.io as any).opts.extraHeaders = {
+        Authorization: formattedToken,
+        'X-App-Version': APP_VERSION,
+      };
+      (socketInstance.io as any).opts.query = {
+        token: formattedToken,
+        appVersion: APP_VERSION,
+      };
     }
     if (socketInstance.connected) {
       notifyListeners(true, null);
@@ -125,12 +136,15 @@ export async function connectSocket(): Promise<Socket | null> {
     autoConnect: false,
     auth: {
       token: formattedToken,
+      appVersion: APP_VERSION,
     },
     extraHeaders: {
       Authorization: formattedToken,
+      'X-App-Version': APP_VERSION,
     },
     query: {
       token: formattedToken,
+      appVersion: APP_VERSION,
     },
     reconnection: true,
     reconnectionAttempts: Infinity,
@@ -149,14 +163,28 @@ export async function connectSocket(): Promise<Socket | null> {
     // Presence confirmed by server
   });
 
+  socketInstance.on(SOCKET_EVENTS.CALL_ERROR, (err: any) => {
+    console.warn('[Socket] CALL_ERROR event received:', err);
+    if (err && typeof err === 'object') {
+      if (err.reason === 'update_required' || err.error === 'update_required') {
+        triggerGlobalUpdateRequired(err.min_version, err.force_update_url);
+      } else if (err.reason === 'maintenance' || err.error === 'maintenance') {
+        triggerGlobalMaintenance(err.message);
+      }
+    }
+  });
+
   socketInstance.on('connect_error', (err: any) => {
     const errorMsg = String(err?.message || 'Connection error');
     console.error('[Socket] CONNECT_ERROR:', errorMsg);
     notifyListeners(false, errorMsg);
 
-    // If connection rejected due to expired/invalid JWT or banned account, log out immediately
     const lower = errorMsg.toLowerCase();
-    if (
+    if (lower.includes('update_required')) {
+      triggerGlobalUpdateRequired();
+    } else if (lower.includes('maintenance')) {
+      triggerGlobalMaintenance();
+    } else if (
       lower.includes('jwt') ||
       lower.includes('unauthorized') ||
       lower.includes('token') ||

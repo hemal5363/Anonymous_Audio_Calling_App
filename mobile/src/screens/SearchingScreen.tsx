@@ -12,10 +12,12 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { SearchingScreenNavigationProp } from '../navigation/types';
 import { useCall } from '../call/CallContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
 
 export default function SearchingScreen() {
   const navigation = useNavigation<SearchingScreenNavigationProp>();
-  const { callStatus, cancelFind, lastEndInfo, clearEndInfo } = useCall();
+  const { config } = usePublicConfig();
+  const { callStatus, currentCall, cancelFind, lastEndInfo, clearEndInfo } = useCall();
 
   // Radar pulse animation
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -101,7 +103,9 @@ export default function SearchingScreen() {
 
         {/* Searching Status */}
         <Text style={styles.statusTitle}>
-          {callStatus === 'ringing' ? 'Ringing Partner...' : 'Finding Someone Available...'}
+          {callStatus === 'ringing'
+            ? `Ringing Partner (${currentCall?.ringTimeoutSeconds || config.calls.ring_timeout_seconds}s limit)...`
+            : 'Finding Someone Available...'}
         </Text>
         <Text style={styles.statusSubtitle}>
           {callStatus === 'ringing'

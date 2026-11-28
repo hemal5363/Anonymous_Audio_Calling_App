@@ -6,6 +6,7 @@ import { initSocketServer } from './socket/index.js';
 import { callSessionManager } from './socket/callSessionManager.js';
 import { logger } from './utils/logger.js';
 import { startCleanupJob, stopCleanupJob, runStartupRecovery } from './services/cleanup.service.js';
+import { settingsRegistry } from './services/settings.service.js';
 
 // Top-level handlers for unexpected runtime exceptions and promise rejections
 // Log structured error and cleanly exit so a process manager (PM2, Docker, systemd, Kubernetes) restarts it
@@ -35,6 +36,13 @@ async function bootstrap() {
     const errorDetail = error.message || error.code || error;
     logger.error(`Database connection check failed at startup: ${errorDetail}`);
     logger.warn('Verify that PostgreSQL is running and DATABASE_URL in your .env file is correct.');
+  }
+
+  // Initialize dynamic settings registry (loads defaults; overrides from DB if available)
+  try {
+    await settingsRegistry.init();
+  } catch (err) {
+    logger.warn('Error during settings initialization, running with safe defaults:', err.message);
   }
 
   // Run database startup recovery for stuck call sessions from earlier crashes

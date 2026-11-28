@@ -13,11 +13,14 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { RegisterScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
+import { MIN_REGISTRATION_AGE } from '../config/constants';
 import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 
 export default function RegisterScreen() {
   const navigation = useNavigation<RegisterScreenNavigationProp>();
   const { register } = useAuth();
+  const { config } = usePublicConfig();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -53,8 +56,8 @@ export default function RegisterScreen() {
       setErrorMessage('Please enter a password.');
       return;
     }
-    if (password.length < 8) {
-      setErrorMessage('Password must be at least 8 characters long.');
+    if (password.length < config.auth.password_min_length) {
+      setErrorMessage(`Password must be at least ${config.auth.password_min_length} characters long.`);
       return;
     }
     if (password !== confirmPassword) {
@@ -62,7 +65,7 @@ export default function RegisterScreen() {
       return;
     }
     if (!confirmAge18) {
-      setErrorMessage('You must confirm you are 18 years of age or older.');
+      setErrorMessage(`You must confirm you are ${MIN_REGISTRATION_AGE} years of age or older.`);
       return;
     }
     if (!acceptTerms) {
@@ -81,6 +84,27 @@ export default function RegisterScreen() {
       setLoading(false);
     }
   };
+
+  // Registration paused view when disabled by server
+  if (!config.auth.registration_enabled) {
+    return (
+      <View style={[styles.keyboardContainer, { justifyContent: 'center', alignItems: 'center', padding: 24 }]}>
+        <View style={styles.card}>
+          <Text style={styles.appTitle}>Registrations Paused</Text>
+          <Text style={styles.appSubtitle}>
+            New user registrations are currently paused by platform administrators. Please check back later.
+          </Text>
+          <TouchableOpacity
+            style={[styles.submitButton, { marginTop: 24 }]}
+            onPress={() => navigation.navigate('Login')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.submitButtonText}>Return to Sign In</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <KeyboardAvoidingView
@@ -116,7 +140,7 @@ export default function RegisterScreen() {
             <View style={styles.passwordWrapper}>
               <TextInput
                 style={[styles.input, styles.passwordInput]}
-                placeholder="At least 8 characters"
+                placeholder={`At least ${config.auth.password_min_length} characters`}
                 placeholderTextColor="#64748b"
                 value={password}
                 onChangeText={setPassword}
@@ -154,7 +178,7 @@ export default function RegisterScreen() {
                 {confirmAge18 && <Text style={styles.checkmark}>✓</Text>}
               </View>
               <Text style={styles.checkboxLabel}>
-                I confirm I am <Text style={styles.boldText}>18 years of age or older</Text>.
+                I confirm I am <Text style={styles.boldText}>{MIN_REGISTRATION_AGE} years of age or older</Text>.
               </Text>
             </TouchableOpacity>
 

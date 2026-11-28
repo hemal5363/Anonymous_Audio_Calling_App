@@ -5,13 +5,13 @@ import userRoutes from './user.routes.js';
 import callsRoutes from './calls.routes.js';
 import billingRoutes from './billing.routes.js';
 import adminRoutes from './admin.routes.js';
-import { getAuthConfig } from '../controllers/auth.controller.js';
+import { getPublicConfig } from '../controllers/config.controller.js';
 
 const router = Router();
 
 // Routes
 router.use('/health', healthRoutes);
-router.get('/config/public', getAuthConfig);
+router.get('/config/public', getPublicConfig);
 router.use('/auth', authRoutes);
 router.use('/user', userRoutes);
 router.use('/calls', callsRoutes);

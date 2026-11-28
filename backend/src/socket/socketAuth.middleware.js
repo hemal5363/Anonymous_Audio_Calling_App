@@ -1,6 +1,7 @@
 import { verifyAccessToken } from '../utils/token.js';
 import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { checkAndClearSuspension } from '../services/moderation.service.js';
 
 /**
  * Socket.IO authentication middleware:
@@ -54,7 +55,7 @@ export async function socketAuthMiddleware(socket, next) {
 
     // Verify user in PostgreSQL database
     const { rows } = await pool.query(
-      'SELECT id, email, phone, status, is_available FROM users WHERE id = $1',
+      'SELECT id, email, phone, status, is_available, suspended_until FROM users WHERE id = $1',
       [decoded.userId]
     );
 
@@ -64,6 +65,9 @@ export async function socketAuthMiddleware(socket, next) {
     }
 
     const user = rows[0];
+
+    // Check account status and auto-clear expired suspension if applicable
+    await checkAndClearSuspension(user, pool);
 
     // Reject banned or suspended users
     if (user.status === 'banned') {

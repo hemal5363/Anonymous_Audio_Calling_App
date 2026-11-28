@@ -1,5 +1,10 @@
 import { API_URL } from '../config';
+import { APP_VERSION } from '../config/constants';
 import { tokenStorage } from '../auth/tokenStorage';
+import {
+  triggerGlobalUpdateRequired,
+  triggerGlobalMaintenance,
+} from '../config/PublicConfigContext';
 
 export interface ApiError {
   statusCode: number;
@@ -62,7 +67,10 @@ async function refreshAccessToken(): Promise<string | null> {
   try {
     const res = await fetch(`${API_URL}/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-App-Version': APP_VERSION,
+      },
       body: JSON.stringify({ refreshToken }),
     });
 
@@ -100,6 +108,7 @@ export async function apiClient<T>(
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-App-Version': APP_VERSION,
     ...(options.headers as Record<string, string>),
   };
 
@@ -150,6 +159,19 @@ export async function apiClient<T>(
   const body = isJson ? await response.json() : await response.text();
 
   if (!response.ok) {
+    // Intercept 426 Upgrade Required for version gating
+    if (response.status === 426) {
+      const minVer = isJson && body ? body.min_version : undefined;
+      const forceUrl = isJson && body ? body.force_update_url : undefined;
+      triggerGlobalUpdateRequired(minVer, forceUrl);
+    }
+
+    // Intercept 503 Service Unavailable for maintenance mode
+    if (response.status === 503) {
+      const maintMsg = isJson && body ? body.message : undefined;
+      triggerGlobalMaintenance(maintMsg);
+    }
+
     const errorMsg =
       (isJson && body && (body.message || body.error)) ||
       `Request failed with status ${response.status}`;

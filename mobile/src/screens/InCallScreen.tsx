@@ -12,12 +12,15 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { InCallScreenNavigationProp } from '../navigation/types';
 import { useCall } from '../call/CallContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
 
 export default function InCallScreen() {
   const navigation = useNavigation<InCallScreenNavigationProp>();
+  const { config } = usePublicConfig();
   const {
     callStatus,
     callDuration,
+    maxCallDurationSeconds,
     isMuted,
     isSpeaker,
     toggleMute,
@@ -134,6 +137,15 @@ export default function InCallScreen() {
           {/* Strict Anonymity: No identity shown */}
           <Text style={styles.partnerTitle}>Anonymous Partner</Text>
           <Text style={styles.timerText}>{formatTime(callDuration)}</Text>
+
+          {/* Remaining Time Warning when <= 60 seconds left */}
+          {callDuration >= maxCallDurationSeconds - 60 && (
+            <View style={styles.timeWarningBox}>
+              <Text style={styles.timeWarningText}>
+                ⚠️ 1 minute remaining before call reaches maximum duration ({Math.floor(maxCallDurationSeconds / 60)}m).
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Secondary Safety Controls: Skip, Report, Block */}
@@ -245,7 +257,11 @@ export default function InCallScreen() {
                 onChangeText={setReportNote}
                 multiline
                 numberOfLines={3}
+                maxLength={config.moderation.report_note_max_length}
               />
+              <Text style={styles.charCountText}>
+                {reportNote.length}/{config.moderation.report_note_max_length}
+              </Text>
 
               <View style={styles.modalActionRow}>
                 <TouchableOpacity
@@ -459,9 +475,30 @@ const styles = StyleSheet.create({
     color: '#f8fafc',
     padding: 10,
     marginTop: 6,
-    marginBottom: 16,
+    marginBottom: 4,
     fontSize: 13,
     textAlignVertical: 'top',
+  },
+  charCountText: {
+    color: '#64748b',
+    fontSize: 12,
+    textAlign: 'right',
+    marginBottom: 14,
+  },
+  timeWarningBox: {
+    backgroundColor: 'rgba(234, 179, 8, 0.15)',
+    borderWidth: 1,
+    borderColor: '#eab308',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    marginTop: 10,
+  },
+  timeWarningText: {
+    color: '#fef08a',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   modalActionRow: {
     flexDirection: 'row',

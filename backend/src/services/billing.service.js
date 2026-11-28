@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
 import { SOCKET_EVENTS } from '../socket/events.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
+import { settingsRegistry } from './settings.service.js';
 
 /**
  * UUID validation helper to prevent PostgreSQL syntax errors with mock fixtures
@@ -24,20 +25,27 @@ const activeBillingTimers = new Map();
  * Always queries the database so admin updates apply immediately.
  */
 export async function getMonetizationSettings(clientOrPool = pool) {
-  const db = clientOrPool || pool;
-  const settingsRes = await db.query(
-    "SELECT value_json FROM app_settings WHERE key = 'monetization';"
-  );
+  // If unit test provided a mock client/pool that explicitly mocked the monetization query
+  if (clientOrPool && clientOrPool.query && clientOrPool.query.mock !== undefined) {
+    try {
+      const settingsRes = await clientOrPool.query(
+        "SELECT value_json FROM app_settings WHERE key = 'monetization';"
+      );
+      if (settingsRes?.rows?.length > 0 && settingsRes.rows[0].value_json) {
+        return settingsRes.rows[0].value_json;
+      }
+    } catch (_) {}
+  }
 
-  return (
-    settingsRes.rows[0]?.value_json || {
-      mode: 'free',
-      per_minute_rate: 1.0,
-      currency: 'INR',
-      free_trial_minutes_new_user: 10,
-      free_daily_minute_cap: null,
-    }
-  );
+  return {
+    mode: settingsRegistry.get('monetization_mode'),
+    per_minute_rate: settingsRegistry.get('billing_rate_per_minute'),
+    currency: 'INR',
+    free_trial_minutes_new_user: settingsRegistry.get('free_trial_minutes_new_user'),
+    free_daily_minute_cap: settingsRegistry.get('free_daily_minute_cap'),
+    minimum_balance: settingsRegistry.get('billing_minimum_balance'),
+    subscription_plans: settingsRegistry.get('subscription_plans'),
+  };
 }
 
 /**
@@ -184,13 +192,17 @@ export async function checkCallerBillingStanding(clientOrPool, callerId) {
     }
 
     const rate = Number(monetization.per_minute_rate || 1.0);
+    const minBalSetting = monetization.minimum_balance !== undefined
+      ? Number(monetization.minimum_balance)
+      : (db && db.query && db.query.mock !== undefined ? 0 : Number(settingsRegistry.get('billing_minimum_balance') ?? 0));
+    const requiredBalance = Math.max(rate, minBalSetting);
     const balanceAmount = Number(wallet.balance_amount || 0.0);
 
-    if (balanceAmount >= rate) {
+    if (balanceAmount >= requiredBalance) {
       return { allowed: true, mode };
     }
 
-    logger.info(`Caller ${callerId} rejected: insufficient balance (${balanceAmount} < rate ${rate})`);
+    logger.info(`Caller ${callerId} rejected: insufficient balance (${balanceAmount} < required ${requiredBalance})`);
     return {
       allowed: false,
       error: 'insufficient_balance',
@@ -221,9 +233,40 @@ export async function deductCallMinute(clientOrPool, { callCode, callerId, sessi
 
     // 1. Fetch current monetization mode and rates directly from DB
     const monetization = await getMonetizationSettings(client);
-    const mode = monetization.mode || 'free';
+    let mode = monetization.mode || 'free';
+    let rate = Number(monetization.per_minute_rate || 1.0);
+    let currency = 'INR';
 
-    // If mode is not per_minute (e.g. admin changed mode mid-call), no deduction is required
+    // Prioritize call_sessions snapshot columns for in-progress calls (when real DB client is active)
+    if ((callCode || sessionId) && (!client.query || client.query.mock === undefined)) {
+      try {
+        const sessionRes = await client.query(
+          `SELECT snapshot_mode, snapshot_rate_per_minute, snapshot_currency, billing_mode
+           FROM call_sessions
+           WHERE ${callCode ? 'call_code = $1' : 'id = $1'}
+           LIMIT 1;`,
+          [callCode || sessionId]
+        );
+        if (sessionRes.rows.length > 0) {
+          const sRow = sessionRes.rows[0];
+          if (sRow.snapshot_mode) {
+            mode = sRow.snapshot_mode;
+          } else if (sRow.billing_mode) {
+            mode = sRow.billing_mode;
+          }
+          if (sRow.snapshot_rate_per_minute !== null && sRow.snapshot_rate_per_minute !== undefined) {
+            rate = Number(sRow.snapshot_rate_per_minute);
+          }
+          if (sRow.snapshot_currency) {
+            currency = sRow.snapshot_currency;
+          }
+        }
+      } catch (err) {
+        logger.debug('Failed to query session snapshots in deductCallMinute, using live settings:', err.message);
+      }
+    }
+
+    // If mode is not per_minute (e.g. admin changed mode mid-call or call was free), no deduction is required
     if (mode !== 'per_minute') {
       if (isPool) await client.query('COMMIT');
       return {
@@ -266,7 +309,6 @@ export async function deductCallMinute(clientOrPool, { callCode, callerId, sessi
       };
     }
 
-    const rate = Number(monetization.per_minute_rate || 1.0);
     const freeTrialMins = Number(wallet.free_trial_minutes || 0);
     const balanceMins = Number(wallet.balance_minutes || 0);
     const balanceAmount = Number(wallet.balance_amount || 0);

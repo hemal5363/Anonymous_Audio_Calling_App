@@ -6,6 +6,7 @@ import { Platform, Alert } from 'react-native';
 import { api } from '../api/client';
 import { isSocketConnectedState, connectSocket, getSocket } from '../socket';
 import { tokenStorage } from '../auth/tokenStorage';
+import { getLatestPublicConfig } from '../config/publicConfig';
 
 const PUSH_TOKEN_CACHE_KEY = 'ANON_AUDIO_PUSH_TOKEN';
 const CHANNEL_ID = 'incoming_calls';
@@ -234,7 +235,9 @@ export async function handleNotificationData(
             onIncomingCall({
               callCode: pendingRes.session.callCode,
               sessionId: pendingRes.session.sessionId,
-              ringSeconds: pendingRes.session.ringSeconds || 30,
+              ringSeconds:
+                pendingRes.session.ringSeconds ||
+                getLatestPublicConfig().calls.ring_timeout_seconds,
             });
           }
         });

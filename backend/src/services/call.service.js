@@ -3,6 +3,8 @@ import { callSessionManager } from '../socket/callSessionManager.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { stopCallBillingTimer } from './billing.service.js';
+import { settingsRegistry } from './settings.service.js';
+import { processReportAutoModeration } from './moderation.service.js';
 
 /**
  * Service handling WebRTC call signaling state transitions,
@@ -216,6 +218,7 @@ export async function endCall({ callCode, userId, reason = null }) {
     'system_shutdown',
     'caller_left',
     'cancelled',
+    'max_duration',
   ];
   if (!finalReason || !allowedReasons.includes(finalReason)) {
     if (session?.status === 'ringing' && !session?.connectedAt && userId === callerId) {
@@ -312,33 +315,8 @@ export async function reportPeerDuringCall({ callCode, reporterId, reason, note 
     [sessionId, reporterId, reportedId, reason, note || null]
   );
 
-  // Auto-Moderation: Check if reported user received reports from several different users
-  try {
-    let threshold = 3;
-    const settingsRes = await pool.query("SELECT value_json FROM app_settings WHERE key = 'moderation';");
-    if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.flag_report_threshold) {
-      threshold = Number(settingsRes.rows[0].value_json.flag_report_threshold);
-    }
-
-    const reportCountRes = await pool.query(
-      `SELECT COUNT(DISTINCT reporter_id) as count 
-       FROM reports 
-       WHERE reported_id = $1 AND status != 'dismissed';`,
-      [reportedId]
-    );
-
-    const distinctReports = parseInt(reportCountRes.rows[0]?.count || 0, 10);
-    if (distinctReports >= threshold) {
-      // Mark as flagged for admin review without auto-banning
-      await pool.query(
-        `UPDATE users SET is_flagged = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1;`,
-        [reportedId]
-      );
-      logger.warn(`User ${reportedId} marked as flagged for admin review: reached ${distinctReports} distinct reports (threshold: ${threshold}).`);
-    }
-  } catch (err) {
-    logger.error('Error checking automated moderation threshold:', err.message);
-  }
+  // Auto-Moderation: Unified evaluation pipeline for auto-flag / auto-suspend
+  await processReportAutoModeration(reportedId, pool);
 
   logger.info(`Report submitted: [callCode: ${callCode}, reporterId: ${reporterId}, reportedId: ${reportedId}, reason: ${reason}]`);
 

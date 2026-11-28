@@ -4,6 +4,7 @@ import { useSocket } from '../socket/useSocket';
 import { SOCKET_EVENTS } from '../socket';
 import { getAudioEngine } from './AudioEngine';
 import { api } from '../api/client';
+import { usePublicConfig } from '../config/PublicConfigContext';
 
 export type CallStatus =
   | 'idle'
@@ -18,6 +19,9 @@ export interface ActiveCall {
   sessionId?: string;
   role: 'caller' | 'callee';
   iceServers?: any[];
+  ringTimeoutSeconds?: number;
+  disconnectGracePeriodSeconds?: number;
+  maxCallDurationSeconds?: number;
 }
 
 export interface IncomingCallAlert {
@@ -39,6 +43,7 @@ interface CallContextType {
   incomingCall: IncomingCallAlert | null;
   lastEndInfo: CallEndInfo | null;
   callDuration: number;
+  maxCallDurationSeconds: number;
   isMuted: boolean;
   isSpeaker: boolean;
   startFind: () => void;
@@ -60,7 +65,7 @@ const CallContext = createContext<CallContextType | undefined>(undefined);
 /**
  * Translates server end reason strings to human-friendly feedback messages
  */
-export function getFriendlyEndMessage(reason?: string): string {
+export function getFriendlyEndMessage(reason?: string, maxDurationSeconds?: number): string {
   switch (reason) {
     case 'caller_left':
       return 'The caller cancelled the call before you answered.';
@@ -87,6 +92,10 @@ export function getFriendlyEndMessage(reason?: string): string {
     case 'network_error':
     case 'disconnected':
       return 'Call ended due to a network disconnection.';
+    case 'max_duration': {
+      const mins = maxDurationSeconds ? Math.floor(maxDurationSeconds / 60) : 60;
+      return `Call ended: Maximum call duration (${mins} minutes) reached.`;
+    }
     case 'skipped':
       return 'Your partner skipped to another call.';
     default:
@@ -96,6 +105,7 @@ export function getFriendlyEndMessage(reason?: string): string {
 
 export function CallProvider({ children }: { children: ReactNode }) {
   const { socket, isConnected, socketError } = useSocket();
+  const { config } = usePublicConfig();
 
   const [callStatus, setCallStatus] = useState<CallStatus>('idle');
   const [currentCall, setCurrentCall] = useState<ActiveCall | null>(null);
@@ -138,21 +148,38 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
     // 1. Incoming Call (for Callee)
     const handleIncoming = (payload: any) => {
+      const ringSecs =
+        payload.ring_timeout_seconds ||
+        payload.ringSeconds ||
+        payload.snapshot_ring_timeout ||
+        config.calls.ring_timeout_seconds;
+
       setIncomingCall({
         callCode: payload.callCode,
         sessionId: payload.sessionId,
-        ringSeconds: payload.ringSeconds || 30,
+        ringSeconds: ringSecs,
       });
       setCallStatus('incoming');
     };
 
     // 2. Caller Ringing
     const handleRinging = (payload: any) => {
+      const ringSecs =
+        payload.ring_timeout_seconds ||
+        payload.ringSeconds ||
+        payload.snapshot_ring_timeout ||
+        config.calls.ring_timeout_seconds;
+
       setCurrentCall({
         callCode: payload.callCode,
         sessionId: payload.sessionId,
         role: 'caller',
         iceServers: payload.iceServers,
+        ringTimeoutSeconds: ringSecs,
+        disconnectGracePeriodSeconds:
+          payload.disconnect_grace_period_seconds || config.calls.disconnect_grace_period_seconds,
+        maxCallDurationSeconds:
+          payload.max_call_duration_seconds || payload.snapshot_max_duration || config.calls.max_call_duration_seconds,
       });
       setCallStatus('ringing');
     };
@@ -164,6 +191,12 @@ export function CallProvider({ children }: { children: ReactNode }) {
         sessionId: payload.sessionId,
         role: payload.role || 'caller',
         iceServers: payload.iceServers || [],
+        ringTimeoutSeconds:
+          payload.ring_timeout_seconds || payload.snapshot_ring_timeout || config.calls.ring_timeout_seconds,
+        disconnectGracePeriodSeconds:
+          payload.disconnect_grace_period_seconds || config.calls.disconnect_grace_period_seconds,
+        maxCallDurationSeconds:
+          payload.max_call_duration_seconds || payload.snapshot_max_duration || config.calls.max_call_duration_seconds,
       };
 
       setCurrentCall(active);
@@ -273,10 +306,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
       audioEngine.cleanup();
 
       const reason = payload?.reason || 'ended';
+      const maxSecs = currentCall?.maxCallDurationSeconds || config.calls.max_call_duration_seconds;
       setLastEndInfo({
         callCode: payload?.callCode,
         reason,
-        friendlyMessage: getFriendlyEndMessage(reason),
+        friendlyMessage: getFriendlyEndMessage(reason, maxSecs),
         durationSeconds: payload?.durationSeconds ?? callDurationRef.current,
       });
 
@@ -345,18 +379,21 @@ export function CallProvider({ children }: { children: ReactNode }) {
     };
   }, [socket]);
 
-  // Clean up if connection drops mid-call with ~5 second grace period
+  // Clean up if connection drops mid-call with dynamic disconnect grace period
   useEffect(() => {
     if (!isConnected && (callStatus === 'connected' || callStatus === 'ringing')) {
+      const graceSeconds =
+        currentCall?.disconnectGracePeriodSeconds || config.calls.disconnect_grace_period_seconds;
+      const graceMs = graceSeconds * 1000;
       const realReason = socketError || 'transport close';
       console.warn(
-        `[CallContext] Socket disconnected mid-call (status: ${callStatus}). Starting 5s grace period before ending call. Real reason / error: ${realReason}`
+        `[CallContext] Socket disconnected mid-call (status: ${callStatus}). Starting ${graceSeconds}s grace period before ending call. Real reason / error: ${realReason}`
       );
 
       if (!disconnectTimerRef.current) {
         disconnectTimerRef.current = setTimeout(() => {
           console.error(
-            `[CallContext] Disconnect grace period (5s) expired without reconnect. Ending call due to network disconnection. Reason: ${socketErrorRef.current || 'network error'}`
+            `[CallContext] Disconnect grace period (${graceSeconds}s) expired without reconnect. Ending call due to network disconnection. Reason: ${socketErrorRef.current || 'network error'}`
           );
           stopDurationTimer();
           audioEngine.cleanup();
@@ -368,7 +405,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           setIncomingCall(null);
           setCallStatus('ended');
           disconnectTimerRef.current = null;
-        }, 5000);
+        }, graceMs);
       }
     } else if (isConnected && disconnectTimerRef.current) {
       clearTimeout(disconnectTimerRef.current);
@@ -383,7 +420,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         }
       }
     };
-  }, [isConnected, callStatus, socketError]);
+  }, [isConnected, callStatus, socketError, currentCall, config.calls.disconnect_grace_period_seconds]);
 
   // -------------------------------------------------------------------------
   // Public Action Handlers
@@ -563,6 +600,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         incomingCall,
         lastEndInfo,
         callDuration,
+        maxCallDurationSeconds: currentCall?.maxCallDurationSeconds || config.calls.max_call_duration_seconds,
         isMuted,
         isSpeaker,
         startFind,

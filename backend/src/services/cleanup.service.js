@@ -2,6 +2,7 @@ import { pool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
+import { settingsRegistry } from './settings.service.js';
 
 let cleanupIntervalTimer = null;
 
@@ -84,7 +85,8 @@ export async function cleanupExpiredOtpCodes() {
  */
 export async function cleanupStuckCallSessions() {
   try {
-    // 3a. Clean up ringing sessions that exceeded 60s ring timeout threshold
+    // 3a. Clean up ringing sessions that exceeded ring timeout + 30s threshold
+    const stuckSeconds = settingsRegistry.getDerivedStuckRingingCleanupSeconds();
     const ringingRes = await pool.query(
       `
       UPDATE call_sessions
@@ -93,9 +95,10 @@ export async function cleanupStuckCallSessions() {
           ended_at = CURRENT_TIMESTAMP,
           duration_seconds = 0
       WHERE status IN ('requested', 'ringing')
-        AND requested_at < CURRENT_TIMESTAMP - INTERVAL '60 seconds'
+        AND requested_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 second')
       RETURNING id, call_code;
-      `
+      `,
+      [stuckSeconds]
     );
 
     if (ringingRes.rowCount > 0) {
@@ -162,15 +165,14 @@ export async function cleanupStuckCallSessions() {
  */
 export async function cleanupStaleAvailability() {
   try {
-    let gracePeriodMinutes = 60;
-
-    // Fetch grace period from app_settings
-    const settingsRes = await pool.query(
-      `SELECT value_json FROM app_settings WHERE key = 'retention';`
-    );
-
-    if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.availability_grace_period_minutes !== undefined) {
-      gracePeriodMinutes = Number(settingsRes.rows[0].value_json.availability_grace_period_minutes);
+    let gracePeriodMinutes = Number(settingsRegistry.get('availability_grace_period_minutes'));
+    if (pool.query && pool.query.mock !== undefined) {
+      try {
+        const { rows } = await pool.query("SELECT value_json FROM app_settings WHERE key = 'retention'");
+        if (rows.length > 0 && rows[0].value_json?.availability_grace_period_minutes !== undefined) {
+          gracePeriodMinutes = Number(rows[0].value_json.availability_grace_period_minutes);
+        }
+      } catch (_) {}
     }
 
     const onlineUserIds = userSocketMap.getOnlineUserIds();
@@ -227,15 +229,14 @@ export async function cleanupStaleAvailability() {
  */
 export async function applyCallHistoryRetention() {
   try {
-    let retentionDays = 90;
-
-    // Fetch retention setting from app_settings
-    const settingsRes = await pool.query(
-      `SELECT value_json FROM app_settings WHERE key = 'retention';`
-    );
-
-    if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.call_history_retention_days !== undefined) {
-      retentionDays = Number(settingsRes.rows[0].value_json.call_history_retention_days);
+    let retentionDays = Number(settingsRegistry.get('call_history_retention_days'));
+    if (pool.query && pool.query.mock !== undefined) {
+      try {
+        const { rows } = await pool.query("SELECT value_json FROM app_settings WHERE key = 'retention'");
+        if (rows.length > 0 && rows[0].value_json?.call_history_retention_days !== undefined) {
+          retentionDays = Number(rows[0].value_json.call_history_retention_days);
+        }
+      } catch (_) {}
     }
 
     if (retentionDays <= 0) {

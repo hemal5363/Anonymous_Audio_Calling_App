@@ -14,6 +14,8 @@ import { useNavigation } from '@react-navigation/native';
 import { WalletScreenNavigationProp } from '../navigation/types';
 import { api } from '../api/client';
 import { getFriendlyEndMessage } from '../call/CallContext';
+import { usePublicConfig } from '../config/PublicConfigContext';
+import { BILLING_CURRENCY } from '../config/constants';
 
 interface WalletResponse {
   wallet: {
@@ -71,14 +73,19 @@ interface CallHistoryResponse {
 
 export default function WalletScreen() {
   const navigation = useNavigation<WalletScreenNavigationProp>();
+  const { config } = usePublicConfig();
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const [monetizationMode, setMonetizationMode] = useState<'free' | 'subscription' | 'per_minute'>('free');
+  const [monetizationMode, setMonetizationMode] = useState<'free' | 'subscription' | 'per_minute'>(
+    config?.monetization?.mode || 'free'
+  );
   const [walletData, setWalletData] = useState<WalletResponse['wallet'] | null>(null);
-  const [ratePerMinute, setRatePerMinute] = useState<string>('1.00');
+  const [ratePerMinute, setRatePerMinute] = useState<string>(
+    String(config?.monetization?.rate_per_minute ?? '1.00')
+  );
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionResponse['active_subscription'] | null>(null);
   const [availablePlans, setAvailablePlans] = useState<SubscriptionResponse['available_plans']>([]);
   const [callHistory, setCallHistory] = useState<CallHistoryItem[]>([]);
@@ -199,7 +206,9 @@ export default function WalletScreen() {
               </View>
               <Text style={styles.cardTitle}>Free Calling Active</Text>
               <Text style={styles.cardSubtitle}>
-                Calls are completely free on this platform. Enjoy unlimited anonymous voice conversations!
+                {config.monetization.free_daily_minute_cap > 0
+                  ? `Calls are free on this platform up to ${config.monetization.free_daily_minute_cap} mins per day.`
+                  : 'Calls are completely free on this platform. Enjoy unlimited anonymous voice conversations!'}
               </Text>
             </View>
           )}
@@ -219,7 +228,7 @@ export default function WalletScreen() {
                   <Text style={styles.subExpiry}>
                     Active until {formatDate(subscriptionData.ends_at)}
                   </Text>
-                  {subscriptionData.daily_minute_cap ? (
+                  {subscriptionData.daily_minute_cap && subscriptionData.daily_minute_cap > 0 ? (
                     <Text style={styles.subUsage}>
                       Today's usage: {subscriptionData.minutes_used_today} /{' '}
                       {subscriptionData.daily_minute_cap} mins
@@ -246,13 +255,13 @@ export default function WalletScreen() {
                       <View style={styles.planRow}>
                         <Text style={styles.planName}>{plan.name}</Text>
                         <Text style={styles.planPrice}>
-                          {plan.currency} {plan.price}
+                          {BILLING_CURRENCY} {plan.price}
                         </Text>
                       </View>
                       <Text style={styles.planDesc}>{plan.description}</Text>
                       <Text style={styles.planValidity}>
                         Valid for {plan.duration_days} days
-                        {plan.daily_minute_cap ? ` • ${plan.daily_minute_cap} mins/day` : ' • Unlimited'}
+                        {plan.daily_minute_cap && plan.daily_minute_cap > 0 ? ` • ${plan.daily_minute_cap} mins/day` : ' • Unlimited'}
                       </Text>
                     </View>
                   ))}
@@ -272,19 +281,29 @@ export default function WalletScreen() {
 
               <Text style={styles.balanceLabel}>Current Wallet Balance</Text>
               <Text style={styles.balanceAmount}>
-                {walletData?.currency || 'INR'} {walletData?.balance_amount || '0.00'}
+                {BILLING_CURRENCY} {walletData?.balance_amount || '0.00'}
               </Text>
 
               <View style={styles.rateRow}>
                 <Text style={styles.rateText}>
-                  Rate: {walletData?.currency || 'INR'} {ratePerMinute} / min
+                  Rate: {BILLING_CURRENCY} {ratePerMinute} / min
                 </Text>
                 {walletData?.free_trial_minutes ? (
                   <Text style={styles.trialText}>
                     🎁 {walletData.free_trial_minutes} trial mins remaining
                   </Text>
+                ) : config.monetization.free_trial_minutes_new_user > 0 ? (
+                  <Text style={styles.trialText}>
+                    🎁 {config.monetization.free_trial_minutes_new_user} trial mins (new users)
+                  </Text>
                 ) : null}
               </View>
+
+              {config.monetization.minimum_balance > 0 ? (
+                <Text style={styles.minBalanceText}>
+                  Minimum balance required: {BILLING_CURRENCY} {Number(config.monetization.minimum_balance).toFixed(2)}
+                </Text>
+              ) : null}
 
               {/* Top-Up Button: Disabled with "Coming soon" as payment gateway is pending */}
               <TouchableOpacity
@@ -487,6 +506,11 @@ const styles = StyleSheet.create({
     color: '#34d399',
     fontSize: 12,
     fontWeight: '600',
+  },
+  minBalanceText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginBottom: 14,
   },
   topUpButton: {
     backgroundColor: '#2563eb',

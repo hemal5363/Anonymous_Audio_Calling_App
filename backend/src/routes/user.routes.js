@@ -10,6 +10,7 @@ import {
   reportUser,
   getCallHistory,
   deleteAccount,
+  updateConsent,
 } from '../controllers/user.controller.js';
 import { authenticateUser } from '../middleware/auth.middleware.js';
 
@@ -43,5 +44,9 @@ router.get('/calls', getCallHistory);
 // 3.5 Delete Account (Google Play Compliance)
 router.delete('/account', deleteAccount);
 router.delete('/me', deleteAccount);
+
+// 3.6 User Legal Consent Update
+router.put('/consent', updateConsent);
+router.post('/consent', updateConsent);
 
 export default router;

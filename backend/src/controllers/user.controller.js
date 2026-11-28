@@ -4,6 +4,8 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { callSessionManager } from '../socket/callSessionManager.js';
 import { userSocketMap } from '../socket/userSocketMap.js';
+import { settingsRegistry } from '../services/settings.service.js';
+import { processReportAutoModeration } from '../services/moderation.service.js';
 
 // Validation Schemas
 const availabilitySchema = z.object({
@@ -21,19 +23,26 @@ const blockSchema = z.object({
   call_code: z.string().min(1, 'call_code is required').trim(),
 });
 
-const reportSchema = z.object({
-  call_code: z.string().min(1, 'call_code is required').trim(),
-  reason: z.enum(
-    ['harassment', 'abusive_language', 'sexual_content', 'scam', 'underage', 'spam', 'other'],
-    {
-      errorMap: () => ({
-        message:
-          "Reason must be one of: 'harassment', 'abusive_language', 'sexual_content', 'scam', 'underage', 'spam', 'other'",
-      }),
-    }
-  ),
-  note: z.string().max(1000, 'Note must not exceed 1000 characters').optional().nullable(),
-});
+export function getReportSchema() {
+  const maxNoteLength = Number(settingsRegistry.get('report_note_max_length') ?? 1000);
+  return z.object({
+    call_code: z.string().min(1, 'call_code is required').trim(),
+    reason: z.enum(
+      ['harassment', 'abusive_language', 'sexual_content', 'scam', 'underage', 'spam', 'other'],
+      {
+        errorMap: () => ({
+          message:
+            "Reason must be one of: 'harassment', 'abusive_language', 'sexual_content', 'scam', 'underage', 'spam', 'other'",
+        }),
+      }
+    ),
+    note: z
+      .string()
+      .max(maxNoteLength, `Note must not exceed ${maxNoteLength} characters`)
+      .optional()
+      .nullable(),
+  });
+}
 
 /**
  * 3.0 Get Current User Profile
@@ -352,6 +361,7 @@ export async function unblockUser(req, res, next) {
  */
 export async function reportUser(req, res, next) {
   try {
+    const reportSchema = getReportSchema();
     const validated = reportSchema.safeParse(req.body);
     if (!validated.success) {
       return res.status(400).json({
@@ -426,35 +436,8 @@ export async function reportUser(req, res, next) {
     const report = reportRows[0];
     logger.info(`Abuse report filed for call ${call_code} by user ${userId} [Reason: ${reason}]`);
 
-    // 4. Auto-Moderation: Check if reported user received reports from several different users
-    try {
-      let threshold = 3;
-      const settingsRes = await pool.query("SELECT value_json FROM app_settings WHERE key = 'moderation';");
-      if (settingsRes.rows.length > 0 && settingsRes.rows[0].value_json?.flag_report_threshold) {
-        threshold = Number(settingsRes.rows[0].value_json.flag_report_threshold);
-      }
-
-      const { rows: reportCountRows } = await pool.query(
-        `
-        SELECT COUNT(DISTINCT reporter_id) as count
-        FROM reports
-        WHERE reported_id = $1 AND status != 'dismissed';
-        `,
-        [reportedId]
-      );
-
-      const distinctReports = parseInt(reportCountRows[0].count, 10);
-      if (distinctReports >= threshold) {
-        // Mark as flagged for admin review without auto-banning
-        await pool.query(
-          `UPDATE users SET is_flagged = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-          [reportedId]
-        );
-        logger.warn(`User ${reportedId} marked as flagged for admin review: received reports from ${distinctReports} distinct users (threshold: ${threshold}).`);
-      }
-    } catch (err) {
-      logger.error('Error checking automated moderation threshold:', err.message);
-    }
+    // 4. Auto-Moderation: Unified evaluation pipeline for auto-flag / auto-suspend
+    await processReportAutoModeration(reportedId, pool);
 
     return res.status(201).json({
       report_id: report.id,
@@ -542,7 +525,7 @@ export async function getSessionById(req, res, next) {
 
     const { rows } = await pool.query(
       `
-      SELECT id, call_code, caller_id, callee_id, status, end_reason, requested_at, created_at
+      SELECT id, call_code, caller_id, callee_id, status, end_reason, requested_at, created_at, snapshot_ring_timeout
       FROM call_sessions
       WHERE id = $1;
       `,
@@ -570,7 +553,8 @@ export async function getSessionById(req, res, next) {
     if (activeStatus === 'ringing') {
       const requestedTime = memSession?.requestedAt || new Date(session.requested_at).getTime();
       const elapsedSeconds = (Date.now() - requestedTime) / 1000;
-      if (elapsedSeconds > 30) {
+      const ringTimeoutSec = Number(session.snapshot_ring_timeout || settingsRegistry.get('ring_timeout_seconds') || 30);
+      if (elapsedSeconds > ringTimeoutSec) {
         normalizedStatus = 'missed';
       } else {
         normalizedStatus = 'ringing';
@@ -739,6 +723,51 @@ export async function deleteAccount(req, res, next) {
     return res.status(200).json({
       success: true,
       message: 'Your account and personal data have been permanently deleted.',
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * 3.6 Update Terms / Privacy Consent
+ * PUT /user/consent or POST /user/consent
+ */
+export async function updateConsent(req, res, next) {
+  try {
+    const consentSchema = z
+      .object({
+        terms_version: z.string().min(1).optional(),
+        privacy_version: z.string().min(1).optional(),
+      })
+      .refine((data) => data.terms_version !== undefined || data.privacy_version !== undefined, {
+        message: 'At least one of terms_version or privacy_version must be provided',
+      });
+
+    const parsed = consentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        statusCode: 400,
+        error: 'BadRequest',
+        message: parsed.error.errors.map((e) => e.message).join(', '),
+      });
+    }
+
+    const { terms_version, privacy_version } = parsed.data;
+    const { rows } = await pool.query(
+      `UPDATE users
+       SET terms_version = COALESCE($1, terms_version),
+           privacy_version = COALESCE($2, privacy_version),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING id, email, terms_version, privacy_version;`,
+      [terms_version || null, privacy_version || null, req.user.id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Consent updated successfully',
+      user: rows[0],
     });
   } catch (error) {
     next(error);

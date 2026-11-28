@@ -12,6 +12,7 @@ import adminRoutes from './routes/admin.routes.js';
 import { config } from './config/index.js';
 import { getHealth } from './controllers/health.controller.js';
 import { getAuthConfig } from './controllers/auth.controller.js';
+import { getPublicConfig } from './controllers/config.controller.js';
 
 const app = express();
 
@@ -68,14 +69,17 @@ app.use(globalLimiter);
 // Direct root endpoints (per API spec)
 app.get('/health', getHealth);
 app.get('/config/public', getAuthConfig);
+app.get('/api/v1/config/public', getPublicConfig);
+app.get('/v1/config/public', getPublicConfig);
 app.use('/auth', authRoutes);
 app.use('/user', userRoutes);
 app.use('/calls', callsRoutes);
 app.use('/billing', billingRoutes);
 app.use('/admin', adminRoutes);
 
-// Versioned /v1 prefix endpoints
+// Versioned /v1 and /api/v1 prefix endpoints
 app.use('/v1', routes);
+app.use('/api/v1', routes);
 
 // 404 handler
 app.use((req, res) => {

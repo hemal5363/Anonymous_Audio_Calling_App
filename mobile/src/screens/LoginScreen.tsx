@@ -13,15 +13,20 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { LoginScreenNavigationProp } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
-import { getAuthConfig } from '../api/auth';
+import { usePublicConfig } from '../config/PublicConfigContext';
 import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 
 export default function LoginScreen() {
   const navigation = useNavigation<LoginScreenNavigationProp>();
   const { login, requestOtp } = useAuth();
+  const { config } = usePublicConfig();
 
-  const [authMode, setAuthMode] = useState<'email' | 'phone'>('email');
-  const [mobileLoginEnabled, setMobileLoginEnabled] = useState<boolean>(false);
+  const emailEnabled = config.auth.email_login_enabled;
+  const mobileEnabled = config.auth.mobile_login_enabled;
+
+  const [authMode, setAuthMode] = useState<'email' | 'phone'>(
+    emailEnabled ? 'email' : 'phone'
+  );
   const [showPrivacyModal, setShowPrivacyModal] = useState<boolean>(false);
 
   // Email form state
@@ -36,21 +41,14 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Fetch backend public config to check if mobile login is enabled
+  // Sync auth mode if available methods change
   useEffect(() => {
-    let isMounted = true;
-    getAuthConfig().then((cfg) => {
-      if (isMounted) {
-        setMobileLoginEnabled(cfg.mobile_login_enabled);
-        if (!cfg.mobile_login_enabled) {
-          setAuthMode('email');
-        }
-      }
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    if (!emailEnabled && mobileEnabled) {
+      setAuthMode('phone');
+    } else if (emailEnabled && !mobileEnabled) {
+      setAuthMode('email');
+    }
+  }, [emailEnabled, mobileEnabled]);
 
   const validateEmail = (val: string) => {
     const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -128,8 +126,8 @@ export default function LoginScreen() {
           <Text style={styles.appTitle}>Anonymous Audio</Text>
           <Text style={styles.appSubtitle}>Sign in to start one-to-one voice calls</Text>
 
-          {/* Optional Mode Switcher: Only displayed when backend enables mobile login */}
-          {mobileLoginEnabled && (
+          {/* Mode Switcher: Only displayed when both methods are enabled */}
+          {emailEnabled && mobileEnabled && (
             <View style={styles.tabContainer}>
               <TouchableOpacity
                 style={[styles.tabButton, authMode === 'email' && styles.tabButtonActive]}
@@ -153,6 +151,12 @@ export default function LoginScreen() {
                   Mobile OTP
                 </Text>
               </TouchableOpacity>
+            </View>
+          )}
+
+          {!emailEnabled && !mobileEnabled && (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>User logins are temporarily paused by platform administrators.</Text>
             </View>
           )}
 

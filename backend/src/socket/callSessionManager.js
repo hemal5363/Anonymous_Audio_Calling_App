@@ -12,6 +12,8 @@ class CallSessionManager {
     this.sessionsByUser = new Map();
     // Map of sessionId -> session object (for quick push notification state lookups)
     this.sessionsById = new Map();
+    // Map of `${callCode}:${userId}` -> disconnect grace timer
+    this.disconnectTimers = new Map();
   }
 
   /**
@@ -24,7 +26,9 @@ class CallSessionManager {
     calleeId,
     billingMode,
     ringTimeoutMs = 30000,
+    snapshotMaxDuration = 3600,
     onRingTimeout,
+    onMaxDuration,
   }) {
     const session = {
       sessionId,
@@ -37,6 +41,9 @@ class CallSessionManager {
       connectedAt: null,
       mutedUsers: new Set(),
       ringingTimer: null,
+      maxDurationTimer: null,
+      snapshotMaxDuration: Number(snapshotMaxDuration || 3600),
+      onMaxDuration,
     };
 
     if (typeof onRingTimeout === 'function') {
@@ -88,6 +95,52 @@ class CallSessionManager {
   }
 
   /**
+   * Clear max duration timer
+   */
+  clearMaxDurationTimer(session) {
+    if (session && session.maxDurationTimer) {
+      clearTimeout(session.maxDurationTimer);
+      session.maxDurationTimer = null;
+    }
+  }
+
+  /**
+   * Start disconnect grace timer for a user in a call
+   */
+  startDisconnectTimer(callCode, userId, graceMs, onExpire) {
+    const key = `${callCode}:${userId}`;
+    this.clearDisconnectTimer(callCode, userId);
+
+    const timer = setTimeout(() => {
+      this.disconnectTimers.delete(key);
+      if (typeof onExpire === 'function') {
+        onExpire();
+      }
+    }, graceMs);
+
+    if (timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+
+    this.disconnectTimers.set(key, timer);
+    return timer;
+  }
+
+  /**
+   * Clear disconnect grace timer if user reconnects
+   */
+  clearDisconnectTimer(callCode, userId) {
+    const key = `${callCode}:${userId}`;
+    const timer = this.disconnectTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.disconnectTimers.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Mark session as connected
    */
   markConnected(callCode) {
@@ -97,6 +150,21 @@ class CallSessionManager {
     this.clearRingingTimer(session);
     session.status = 'connected';
     session.connectedAt = Date.now();
+
+    // Start max duration timer if configured and not already running
+    if (session.snapshotMaxDuration > 0 && !session.maxDurationTimer) {
+      session.maxDurationTimer = setTimeout(() => {
+        logger.info(`[CallSessionManager] Hard max duration reached for session: ${callCode}`);
+        if (typeof session.onMaxDuration === 'function') {
+          session.onMaxDuration(session);
+        }
+      }, session.snapshotMaxDuration * 1000);
+
+      if (session.maxDurationTimer && typeof session.maxDurationTimer.unref === 'function') {
+        session.maxDurationTimer.unref();
+      }
+    }
+
     return session;
   }
 
@@ -152,6 +220,9 @@ class CallSessionManager {
     if (!session) return null;
 
     this.clearRingingTimer(session);
+    this.clearMaxDurationTimer(session);
+    this.clearDisconnectTimer(callCode, session.callerId);
+    this.clearDisconnectTimer(callCode, session.calleeId);
 
     this.sessionsByCode.delete(callCode);
     this.sessionsByUser.delete(session.callerId);
@@ -169,7 +240,12 @@ class CallSessionManager {
   clear() {
     for (const session of this.sessionsByCode.values()) {
       this.clearRingingTimer(session);
+      this.clearMaxDurationTimer(session);
     }
+    for (const timer of this.disconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.disconnectTimers.clear();
     this.sessionsByCode.clear();
     this.sessionsByUser.clear();
     this.sessionsById.clear();
